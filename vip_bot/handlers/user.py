@@ -10,7 +10,6 @@ from vip_bot.helpers import (
     telegram_user_link,
     is_cloudflare_challenge,
     is_sociabuzz_timeout,
-    is_active_payment_duplicate,
     format_button_amount,
     format_rupiah,
     parse_referral_payload,
@@ -43,20 +42,20 @@ def private_only(handler):
     return wrapped
 
 
-async def send_qris(event, config, store, qris_semaphore, user_locks, package=None, invoice_message=None, bot_code="default"):
+async def send_qris(event, config, db, qris_semaphore, user_locks, package=None, invoice_message=None, bot_code="default"):
     user = await event.get_sender()
     lock = user_locks.setdefault((user.id, bot_code), asyncio.Lock())
     if lock.locked():
         await event.respond("QRIS kamu sedang dibuat. Tunggu beberapa detik, jangan klik berulang.")
         return
     async with lock:
-        await send_qris_locked(event, config, store, qris_semaphore, user, package, invoice_message, bot_code=bot_code)
+        await send_qris_locked(event, config, db, qris_semaphore, user, package, invoice_message, bot_code=bot_code)
 
 
-async def send_qris_locked(event, config, store, qris_semaphore, user, package=None, invoice_message=None, bot_code="default"):
-    store.upsert_user(user, bot_code=bot_code)
-    package = package or default_package(config, store, bot_code=bot_code)
-    pending = store.latest_pending_for_user(user.id, bot_code=bot_code)
+async def send_qris_locked(event, config, db, qris_semaphore, user, package=None, invoice_message=None, bot_code="default"):
+    await db.upsert_user(user, bot_code=bot_code)
+    package = package or default_package(config, bot_code=bot_code)
+    pending = await db.latest_pending_for_user(user.id, bot_code=bot_code)
     if pending:
         await event.respond(
             "Masih ada pembayaran yang sedang dicek. Tunggu statusnya selesai dulu sebelum membuat QRIS baru."
@@ -70,25 +69,8 @@ async def send_qris_locked(event, config, store, qris_semaphore, user, package=N
             await event.client.edit_message(event.chat_id, invoice_message.id, "⏳ Membuat QRIS...")
         except errors.MessageNotModifiedError:
             pass
+
     try:
-        try:
-            await asyncio.to_thread(store.ensure_payment_schema_ready)
-        except Exception as exc:
-            LOGGER.exception("Payment schema is not ready")
-            await invoice_message.edit(
-                "Bot sedang maintenance database. Admin perlu jalankan ulang `supabase_schema.sql`, lalu coba lagi.",
-            )
-            await send_log(
-                event.client,
-                config,
-                store,
-                (
-                    "<b>Database schema not ready</b>\n"
-                    "Action: <code>Run supabase_schema.sql in Supabase SQL Editor</code>\n"
-                    f"Error: <code>{html.escape(str(exc))}</code>"
-                ),
-            )
-            return
         async with qris_semaphore:
             (
                 _session,
@@ -121,8 +103,8 @@ async def send_qris_locked(event, config, store, qris_semaphore, user, package=N
             file=qr_file,
             parse_mode="html",
         )
-        referral = store.pending_referral_for_user(user.id, bot_code=bot_code)
-        store.create_payment(
+        referral = await db.pending_referral_for_user(user.id, bot_code=bot_code)
+        await db.create_payment(
             user,
             buyer_invoice_id,
             order_id,
@@ -141,7 +123,7 @@ async def send_qris_locked(event, config, store, qris_semaphore, user, package=N
         await send_log(
             event.client,
             config,
-            store,
+            db,
             (
                 f"<b>[{html.escape(bot_code)}] QRIS CREATED</b>\n\n"
                 "<blockquote>"
@@ -173,23 +155,11 @@ async def send_qris_locked(event, config, store, qris_semaphore, user, package=N
             await send_log(
                 event.client,
                 config,
-                store,
+                db,
                 (
                     f"<b>[{html.escape(bot_code)}] QRIS gateway blocked</b>\n"
                     f"User: {telegram_user_link(user)} (<code>{user.id}</code>)\n"
                     "Reason: <code>SociaBuzz Cloudflare HTTP 403</code>"
-                ),
-            )
-            return
-        if is_active_payment_duplicate(exc):
-            await event.respond("Masih ada pembayaran yang sedang dicek. Tunggu statusnya selesai dulu sebelum membuat QRIS baru.")
-            await send_log(
-                event.client,
-                config,
-                store,
-                (
-                    f"<b>[{html.escape(bot_code)}] Duplicate active payment blocked</b>\n"
-                    f"User: {telegram_user_link(user)} (<code>{user.id}</code>)"
                 ),
             )
             return
@@ -198,7 +168,7 @@ async def send_qris_locked(event, config, store, qris_semaphore, user, package=N
             await send_log(
                 event.client,
                 config,
-                store,
+                db,
                 (
                     f"<b>[{html.escape(bot_code)}] QRIS gateway timeout</b>\n"
                     f"User: {telegram_user_link(user)} (<code>{user.id}</code>)\n"
@@ -211,13 +181,14 @@ async def send_qris_locked(event, config, store, qris_semaphore, user, package=N
         await send_log(
             event.client,
             config,
-            store,
-            f"<b>[{html.escape(bot_code)}] QRIS error</b>\n<code>{html.escape(str(exc))}</code>"
+            db,
+            f"<b>[{html.escape(bot_code)}] QRIS error</b>\n<code>{html.escape(str(exc))}</code>",
         )
 
 
-async def send_package_menu(event, config, store, message=None, bot_code="default"):
-    buttons = package_buttons(config, store, bot_code=bot_code)
+async def send_package_menu(event, config, db, message=None, bot_code="default"):
+    packages = await db.list_packages(bot_code=bot_code)
+    buttons = package_buttons(config, packages, bot_code=bot_code)
     text = "Silakan pilih paket VIP yang ingin kamu beli:"
     if message is None:
         await event.respond(text, buttons=buttons)
@@ -228,22 +199,22 @@ async def send_package_menu(event, config, store, message=None, bot_code="defaul
             pass
 
 
-async def handle_referral_start(event, config, store, payload, bot_code="default"):
+async def handle_referral_start(event, config, db, payload, bot_code="default"):
     code = parse_referral_payload(payload)
     if not code:
         return
     try:
         user = await event.get_sender()
-        referrer = store.get_user_by_referral_code(code, bot_code=bot_code)
+        referrer = await db.get_user_by_referral_code(code, bot_code=bot_code)
         if not referrer:
             return
-        referral, created = store.create_referral_if_absent(referrer, user, bot_code=bot_code)
+        referral, created = await db.create_referral_if_absent(referrer, user, bot_code=bot_code)
         if not created or not referral:
             return
         await safe_send_user(
             event.client,
             config,
-            store,
+            db,
             referrer["user_id"],
             f"✅ {html.escape(display_name(user))} berhasil diundang menggunakan referral link kamu.",
             parse_mode="html",
@@ -257,7 +228,7 @@ async def handle_referral_start(event, config, store, payload, bot_code="default
         await send_log(
             event.client,
             config,
-            store,
+            db,
             (
                 f"<b>[{html.escape(bot_code)}] Referral Joined</b>\n"
                 f"User {plain_user_link(invited_row)} joined using Referral User {plain_user_link(referrer)}\n\n"
@@ -269,16 +240,16 @@ async def handle_referral_start(event, config, store, payload, bot_code="default
         await send_log(
             event.client,
             config,
-            store,
-            f"<b>[{html.escape(bot_code)}] Referral start error</b>\n<code>{html.escape(str(exc))}</code>"
+            db,
+            f"<b>[{html.escape(bot_code)}] Referral start error</b>\n<code>{html.escape(str(exc))}</code>",
         )
 
 
-async def send_profile(event, config, store, bot_code="default"):
+async def send_profile(event, config, db, bot_code="default"):
     try:
         user = await event.get_sender()
-        store.upsert_user(user, bot_code=bot_code)
-        stats = store.referral_stats(user.id, bot_code=bot_code)
+        await db.upsert_user(user, bot_code=bot_code)
+        stats = await db.referral_stats(user.id, bot_code=bot_code)
         me = await event.client.get_me()
         code = stats["referral_code"]
         link = f"https://t.me/{me.username}?start=ref_{code}" if me.username else f"ref_{code}"
@@ -310,16 +281,16 @@ async def send_profile(event, config, store, bot_code="default"):
         await send_log(
             event.client,
             config,
-            store,
-            f"<b>[{html.escape(bot_code)}] Profile error</b>\nUser: <code>{event.sender_id}</code>\n<code>{html.escape(str(exc))}</code>"
+            db,
+            f"<b>[{html.escape(bot_code)}] Profile error</b>\nUser: <code>{event.sender_id}</code>\n<code>{html.escape(str(exc))}</code>",
         )
 
 
-async def send_withdrawal_menu(event, config, store, bot_code="default"):
+async def send_withdrawal_menu(event, config, db, bot_code="default"):
     try:
         user = await event.get_sender()
-        store.upsert_user(user, bot_code=bot_code)
-        stats = store.referral_stats(event.sender_id, bot_code=bot_code)
+        await db.upsert_user(user, bot_code=bot_code)
+        stats = await db.referral_stats(event.sender_id, bot_code=bot_code)
         await event.respond(
             f"Saldo kamu ({html.escape(bot_code)}): <b>{format_rupiah(stats['balance'])}</b>\n\nKlik tombol di bawah untuk tarik saldo.",
             parse_mode="html",
@@ -331,21 +302,26 @@ async def send_withdrawal_menu(event, config, store, bot_code="default"):
         await send_log(
             event.client,
             config,
-            store,
-            f"<b>[{html.escape(bot_code)}] Withdrawal menu error</b>\nUser: <code>{event.sender_id}</code>\n<code>{html.escape(str(exc))}</code>"
+            db,
+            f"<b>[{html.escape(bot_code)}] Withdrawal menu error</b>\nUser: <code>{event.sender_id}</code>\n<code>{html.escape(str(exc))}</code>",
         )
 
 
-async def create_withdrawal_request(event, config, store, user, amount, details, bot_code="default"):
-    stats = store.referral_stats(user.id, bot_code=bot_code)
+async def create_withdrawal_request(event, config, db, user, amount, details, bot_code="default"):
+    stats = await db.referral_stats(user.id, bot_code=bot_code)
     if not valid_withdrawal_amount(amount, stats["balance"]):
         await event.respond("Minimal penarikan saldo adalah Rp10.000 dan saldo kamu harus mencukupi.")
         return
-    withdrawal = store.create_withdrawal(user, amount, details, bot_code=bot_code)
+    try:
+        withdrawal = await db.create_withdrawal(user, amount, details, bot_code=bot_code)
+    except Exception as exc:
+        await event.respond(f"Gagal mengajukan penarikan: {html.escape(str(exc))}")
+        return
+
     await send_log(
         event.client,
         config,
-        store,
+        db,
         (
             f"<b>[{html.escape(bot_code)}] Withdrawal requested</b>\n"
             f"ID: <code>{withdrawal.get('id')}</code>\n"
@@ -369,48 +345,48 @@ async def create_withdrawal_request(event, config, store, user, amount, details,
     )
 
 
-def register_user_handlers(client, config, store, qris_semaphore, user_locks, withdrawal_states, bot_code="default"):
+def register_user_handlers(client, config, db, qris_semaphore, user_locks, withdrawal_states, bot_code="default"):
     buy_label, profile_label, withdrawal_label = main_menu_button_labels()
 
     @client.on(events.NewMessage(pattern=r"^/start(?:\s+(.+))?$"))
     @private_only
     async def start(event):
         user = await event.get_sender()
-        store.upsert_user(user, bot_code=bot_code)
-        await handle_referral_start(event, config, store, event.pattern_match.group(1) or "", bot_code=bot_code)
+        await db.upsert_user(user, bot_code=bot_code)
+        await handle_referral_start(event, config, db, event.pattern_match.group(1) or "", bot_code=bot_code)
         bot_name = getattr(client, "bot_name", "") or bot_code
         await event.respond(main_menu_keyboard_text(user, bot_name=bot_name), buttons=main_menu_buttons(), parse_mode="html")
-        await send_package_menu(event, config, store, bot_code=bot_code)
+        await send_package_menu(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(pattern=r"^/buy$"))
     @private_only
     async def buy_command(event):
-        await send_package_menu(event, config, store, bot_code=bot_code)
+        await send_package_menu(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(func=lambda e: bool(e.is_private and e.raw_text and e.raw_text.strip() == buy_label)))
     @private_only
     async def buy_button(event):
-        await send_package_menu(event, config, store, bot_code=bot_code)
+        await send_package_menu(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(pattern=r"^/profile$"))
     @private_only
     async def profile_command(event):
-        await send_profile(event, config, store, bot_code=bot_code)
+        await send_profile(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(func=lambda e: bool(e.is_private and e.raw_text and e.raw_text.strip() == profile_label)))
     @private_only
     async def profile_button(event):
-        await send_profile(event, config, store, bot_code=bot_code)
+        await send_profile(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(pattern=r"^/withdraw$"))
     @private_only
     async def withdrawal_command(event):
-        await send_withdrawal_menu(event, config, store, bot_code=bot_code)
+        await send_withdrawal_menu(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(func=lambda e: bool(e.is_private and e.raw_text and e.raw_text.strip() == withdrawal_label)))
     @private_only
     async def withdrawal_button(event):
-        await send_withdrawal_menu(event, config, store, bot_code=bot_code)
+        await send_withdrawal_menu(event, config, db, bot_code=bot_code)
 
     @client.on(events.CallbackQuery(data=b"withdraw_start"))
     async def start_withdrawal_flow(event):
@@ -425,15 +401,15 @@ def register_user_handlers(client, config, store, qris_semaphore, user_locks, wi
     @client.on(events.CallbackQuery(pattern=rb"^pkg:(.+)$"))
     async def choose_package(event):
         code = event.pattern_match.group(1).decode()
-        package = store.get_package(code, bot_code=bot_code)
+        package = await db.get_package(code, bot_code=bot_code)
         if not package:
-            package = default_package(config, store, bot_code=bot_code)
+            package = default_package(config, bot_code=bot_code)
         await event.answer()
         message = await event.get_message()
         await send_qris(
             event,
             config,
-            store,
+            db,
             qris_semaphore,
             user_locks,
             package=package,
@@ -457,7 +433,7 @@ def register_user_handlers(client, config, store, qris_semaphore, user_locks, wi
             if not amount:
                 await event.respond("Nominal harus berupa angka bulat minimal 10000. Masukkan kembali nominal:")
                 return
-            stats = store.referral_stats(user.id, bot_code=bot_code)
+            stats = await db.referral_stats(user.id, bot_code=bot_code)
             if not valid_withdrawal_amount(amount, stats["balance"]):
                 await event.respond(
                     f"Saldo tidak cukup atau kurang dari batas minimal. Saldo kamu: <b>{format_rupiah(stats['balance'])}</b>. Masukkan kembali nominal:",
@@ -524,7 +500,7 @@ def register_user_handlers(client, config, store, qris_semaphore, user_locks, wi
         }
         withdrawal_states.pop(state_key, None)
         await event.answer()
-        await create_withdrawal_request(event, config, store, user, amount, details, bot_code=bot_code)
+        await create_withdrawal_request(event, config, db, user, amount, details, bot_code=bot_code)
 
     @client.on(events.CallbackQuery(data=b"withdraw_cancel"))
     async def cancel_withdrawal(event):

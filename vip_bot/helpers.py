@@ -10,7 +10,6 @@ import secrets
 import string
 import time
 import requests
-import httpx
 from telethon import Button, errors, functions
 from telethon.errors import FloodWaitError
 from telethon.tl.types import (
@@ -75,88 +74,87 @@ def utc_now_iso():
     return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
 
 
-def parse_iso_datetime(raw):
+def parse_iso_datetime(val):
+    if not val:
+        return None
+    if isinstance(val, dt.datetime):
+        return val if val.tzinfo else val.replace(tzinfo=dt.UTC)
+    raw = str(val).strip()
     if not raw:
         return None
-    if isinstance(raw, dt.datetime):
-        parsed = raw
-    else:
-        try:
-            parsed = dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=dt.UTC)
-    return parsed.astimezone(dt.UTC)
-
-
-def adaptive_poll_delay(created_at, expires_at, attempts=0, error=""):
-    now = dt.datetime.now(dt.UTC)
-    if expires_at:
-        remaining = (expires_at - now).total_seconds()
-        if remaining <= 0:
-            return None
-        total = max((expires_at - created_at).total_seconds(), 1)
-        elapsed = max((now - created_at).total_seconds(), 0)
-        progress = max(0.0, min(1.0, elapsed / total))
-    else:
-        remaining = None
-        total = 1800
-        progress = min(1.0, max(0, attempts) / 300)
-
-    if error:
-        base = min(180, max(30, 20 * max(1, min(int(attempts or 1), 6))))
-        if remaining is None:
-            return base
-        return max(5, min(base, int(max(5, remaining / 2))))
-
-    if remaining is not None:
-        final_window = max(30, min(120, total * 0.20))
-        if remaining <= final_window:
-            return 5
-
-    if progress < 0.05:
-        return 5
-    if progress < 0.15:
-        return 8
-    if progress < 0.75:
-        return min(45, max(12, int(total * 0.015)))
-    return 10
-
-
-def next_poll_at(created_at, expires_at, attempts=0, error=""):
-    delay = adaptive_poll_delay(created_at, expires_at, attempts=attempts, error=error)
-    if delay is None:
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(raw)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.UTC)
+    except ValueError:
         return None
-    return (dt.datetime.now(dt.UTC) + dt.timedelta(seconds=delay)).replace(microsecond=0).isoformat()
+
+
+def adaptive_poll_delay(created_at, expires_at=None, attempts=0, error=""):
+    if error:
+        return min(30, 2 ** min(attempts, 5))
+    return 3
+
+
+def next_poll_at(created_at, expires_at=None, attempts=0, error=""):
+    now = dt.datetime.now(dt.UTC)
+    delay = adaptive_poll_delay(created_at, expires_at, attempts=attempts, error=error)
+    return (now + dt.timedelta(seconds=delay)).replace(microsecond=0).isoformat()
+
+
+def format_rupiah(amount):
+    return f"Rp{int(amount):,}".replace(",", ".")
+
+
+def format_button_amount(amount):
+    return f"{int(amount):,}".replace(",", ".")
+
+
+def format_custom_qris_expiry(countdown_iso):
+    expires = parse_iso_datetime(countdown_iso)
+    if not expires:
+        return ""
+    local = expires.astimezone(WIB)
+    return local.strftime("%d %b %Y, %H:%M WIB")
+
+
+def format_qris_expiry(raw_expires):
+    if not raw_expires:
+        return ""
+    parsed = parse_iso_datetime(raw_expires)
+    if not parsed:
+        return raw_expires
+    return parsed.astimezone(WIB).strftime("%d/%m/%Y %H:%M WIB")
+
+
+def format_log_datetime(raw_iso):
+    parsed = parse_iso_datetime(raw_iso)
+    if not parsed:
+        return "-"
+    local = parsed.astimezone(WIB)
+    return local.strftime("%d %b %Y, %H:%M WIB")
 
 
 def display_name(user):
-    parts = [user.first_name or "", user.last_name or ""]
-    name = " ".join(part for part in parts if part).strip()
-    return name or str(user.id)
+    first = getattr(user, "first_name", "") or ""
+    last = getattr(user, "last_name", "") or ""
+    full = f"{first} {last}".strip()
+    return full or getattr(user, "username", "") or str(getattr(user, "id", ""))
 
 
 def random_indonesian_identity():
     first = secrets.choice(FIRST_NAMES)
     last = secrets.choice(LAST_NAMES)
-    suffix = random.randint(1000, 999999)
-    email = f"{first.lower()}.{last.lower()}{suffix}@gmail.com"
+    num = random.randint(1000, 999999)
+    email = f"{first.lower()}.{last.lower()}{num}@gmail.com"
     return f"{first} {last}", email
 
 
 def public_invoice_id():
-    date_part = dt.datetime.now(dt.timezone(dt.timedelta(hours=7))).strftime("%y%m%d")
+    date_part = dt.datetime.now(WIB).strftime("%y%m%d")
     suffix = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
     return f"VIP-{date_part}-{suffix}"
-
-
-def format_rupiah(amount):
-    return f"Rp{amount:,}".replace(",", ".")
-
-
-def format_button_amount(amount):
-    return f"{int(amount):,}".replace(",", ".")
 
 
 def format_referral_code(user_id):
@@ -179,7 +177,7 @@ def parse_referral_payload(payload):
     return ""
 
 
-def should_create_referral(invited_user_id, referrer_user_id, existing_referral):
+def should_create_referral(invited_user_id, referrer_user_id, existing_referral=None):
     return bool(referrer_user_id) and int(invited_user_id) != int(referrer_user_id) and not existing_referral
 
 
@@ -192,11 +190,16 @@ def updated_referral_counters(user_row, commission):
 
 
 def valid_withdrawal_amount(amount, balance):
-    return int(amount) >= MIN_WITHDRAWAL_AMOUNT and int(amount) <= int(balance)
+    try:
+        val = int(amount)
+        return val >= MIN_WITHDRAWAL_AMOUNT and val <= int(balance)
+    except (TypeError, ValueError):
+        return False
 
 
 def referral_commission(payment):
-    return int(payment.get("package_amount") or 0) // 2
+    amount = int(payment.get("package_amount") or payment.get("amount") or 0)
+    return amount // 2
 
 
 def parse_withdrawal_amount(raw):
@@ -204,7 +207,7 @@ def parse_withdrawal_amount(raw):
     return int(digits) if digits else 0
 
 
-def withdrawal_details_text(raw):
+def parse_withdrawal_details(raw):
     fields = {}
     labels = {
         "no hp": "phone",
@@ -224,6 +227,20 @@ def withdrawal_details_text(raw):
     return fields
 
 
+def withdrawal_details_text(amount_or_raw, phone=None, wallet_name=None, account_name=None):
+    if phone is None and isinstance(amount_or_raw, str) and ("\n" in amount_or_raw or ":" in amount_or_raw):
+        return parse_withdrawal_details(amount_or_raw)
+    amount = amount_or_raw
+    return (
+        "<b>Konfirmasi Penarikan Saldo</b>\n\n"
+        f"• Nominal: <b>{format_rupiah(amount)}</b>\n"
+        f"• No HP E-Wallet: <code>{html.escape(str(phone or ''))}</code>\n"
+        f"• Nama E-Wallet: <b>{html.escape(str(wallet_name or ''))}</b>\n"
+        f"• Atas Nama: <b>{html.escape(str(account_name or ''))}</b>\n\n"
+        "Pastikan data di atas sudah benar sebelum klik Konfirmasi."
+    )
+
+
 def validate_broadcast_time(raw):
     value = (raw or "").strip().lower()
     if value in BROADCAST_DISABLED_VALUES:
@@ -234,7 +251,7 @@ def validate_broadcast_time(raw):
 
 
 def is_active_payment_duplicate(exc):
-    return "idx_vip_payments_one_active_per_user" in str(exc)
+    return "idx_vip_payments_one_active_per_user" in str(exc) or "unique" in str(exc).lower()
 
 
 def is_cloudflare_challenge(exc):
@@ -284,58 +301,6 @@ def json_to_entities(raw):
 
 def is_admin(config, user_id):
     return user_id in config.admin_user_ids
-
-
-def runtime_vip_chat_id(config, store):
-    return store.get_int_setting("vip_chat_id", config.vip_chat_id)
-
-
-def runtime_log_chat_id(config, store):
-    return store.get_int_setting("log_chat_id", config.log_chat_id)
-
-
-def format_qris_expiry(raw_expires):
-    if not raw_expires:
-        return ""
-    parsed = parse_iso_datetime(raw_expires)
-    if not parsed:
-        return raw_expires
-    return parsed.astimezone(dt.timezone(dt.timedelta(hours=7))).strftime("%d/%m/%Y %H:%M WIB")
-
-
-def format_log_datetime(raw_datetime):
-    parsed = parse_iso_datetime(raw_datetime)
-    if not parsed:
-        return html.escape(str(raw_datetime or ""))
-    local = parsed.astimezone(dt.timezone(dt.timedelta(hours=7)))
-    return html.escape(local.strftime("%Y %B %d, %H:%M:%S WIB"))
-
-
-def format_custom_qris_expiry(raw_expires):
-    parsed = parse_iso_datetime(raw_expires)
-    if not parsed:
-        return html.escape(str(raw_expires or ""))
-    local = parsed.astimezone(dt.timezone(dt.timedelta(hours=7)))
-    month_names = {
-        1: "Januari",
-        2: "Februari",
-        3: "Maret",
-        4: "April",
-        5: "Mei",
-        6: "Juni",
-        7: "Juli",
-        8: "Agustus",
-        9: "September",
-        10: "Oktober",
-        11: "November",
-        12: "Desember",
-    }
-    return f"{local.day} {month_names[local.month]} {local.year}, {local:%H:%M:%S} WIB"
-
-
-def user_link(row):
-    name = html.escape(row["full_name"] or str(row["user_id"]))
-    return f'<a href="tg://user?id={row["user_id"]}">{name}</a>'
 
 
 def username_or_name(row):
@@ -392,7 +357,10 @@ def normalize_package_code(code):
     return normalized
 
 
-# Synced gateway client calls
+def user_link(payment):
+    name = html.escape(payment.get("full_name") or str(payment.get("user_id")))
+    return f'<a href="tg://user?id={payment["user_id"]}">{name}</a>'
+
 
 def create_qris_sync(config, user, amount=None, note_prefix="VIP"):
     session = new_session(config.sociabuzz_cookie)
@@ -449,13 +417,35 @@ def check_payment_sync(config, inv_id):
     return check_pending(session, inv_id)
 
 
-# Async wrappers and messaging utilities
+# Asynchronous DB-dependent Helpers
 
-async def send_log(client, config, store, text, **kwargs):
+async def runtime_vip_chat_id(config, db):
+    if hasattr(db, "get_setting"):
+        val = await db.get_setting("vip_chat_id")
+        if val:
+            try:
+                return int(val)
+            except ValueError:
+                pass
+    return config.vip_chat_id
+
+
+async def runtime_log_chat_id(config, db):
+    if hasattr(db, "get_setting"):
+        val = await db.get_setting("log_chat_id")
+        if val:
+            try:
+                return int(val)
+            except ValueError:
+                pass
+    return config.log_chat_id
+
+
+async def send_log(client, config, db, text, **kwargs):
     try:
-        log_chat_id = runtime_log_chat_id(config, store)
+        log_chat_id = await runtime_log_chat_id(config, db)
     except Exception as exc:
-        LOGGER.warning("Failed to load runtime log_chat_id, falling back to env: %s", exc)
+        LOGGER.warning("Failed to load runtime log_chat_id: %s", exc)
         log_chat_id = config.log_chat_id
     if not log_chat_id:
         return
@@ -465,7 +455,7 @@ async def send_log(client, config, store, text, **kwargs):
         LOGGER.warning("Failed to send log message to %s: %s", log_chat_id, exc)
 
 
-async def safe_send_user(client, config, store, user_id, text, **kwargs):
+async def safe_send_user(client, config, db, user_id, text, **kwargs):
     try:
         await client.send_message(user_id, text, **kwargs)
         return "sent"
@@ -485,7 +475,7 @@ async def safe_send_user(client, config, store, user_id, text, **kwargs):
         await send_log(
             client,
             config,
-            store,
+            db,
             (
                 f"<b>{log_title}</b>\n"
                 f"User: <code>{user_id}</code>\n"
@@ -495,7 +485,7 @@ async def safe_send_user(client, config, store, user_id, text, **kwargs):
         return status
 
 
-async def send_broadcast_to_user(client, user_id, broadcast_message):
+async def send_broadcast_to_user(client, db, broadcast_message, user_id):
     async def send_once():
         text = broadcast_message.get("message_text") or ""
         media_file_id = broadcast_message.get("media_telegram_file_id") or ""
@@ -523,12 +513,9 @@ async def send_broadcast_to_user(client, user_id, broadcast_message):
         error = exc
 
     if is_user_blocked_error(error):
-        LOGGER.warning("User %s blocked the bot, cannot deliver broadcast", user_id)
         return "blocked"
     if is_user_deactivated_error(error):
-        LOGGER.warning("User %s is deleted/deactivated, cannot deliver broadcast", user_id)
         return "deactivated"
-    LOGGER.warning("Broadcast send error to user %s: %s", user_id, error)
     return "error"
 
 
@@ -541,27 +528,11 @@ async def delete_qris_message(client, payment):
     try:
         await client.delete_messages(int(chat_id), [int(message_id)], revoke=True)
     except Exception as exc:
-        text = str(exc).lower()
-        if "service message" in text or "message id is invalid" in text or "could not find" in text:
-            LOGGER.info(
-                "QRIS message %s in chat %s for invoice %s was already unavailable or not deletable: %s",
-                message_id,
-                chat_id,
-                invoice_id,
-                exc,
-            )
-            return
-        LOGGER.warning(
-            "Failed to delete QRIS message %s in chat %s for invoice %s: %s",
-            message_id,
-            chat_id,
-            invoice_id,
-            exc,
-        )
+        pass
 
 
-async def create_invite_link(client, config, store, payment):
-    vip_chat_id = int(payment.get("vip_chat_id") or 0) or runtime_vip_chat_id(config, store)
+async def create_invite_link(client, config, db, payment):
+    vip_chat_id = int(payment.get("vip_chat_id") or 0) or (await runtime_vip_chat_id(config, db))
     if not vip_chat_id:
         raise RuntimeError("VIP chat belum di-set. Admin perlu set paket atau pakai /setvip <chat_id>.")
     invite_hours = int(payment.get("invite_expire_hours") or 0) or config.invite_expire_hours

@@ -1,5 +1,7 @@
-requests
-qrcode[pil]
 telethon
+asyncpg
 python-dotenv
-supabase
+qrcode[pil]
+requests
+pillow
+tzdata

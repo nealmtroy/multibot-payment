@@ -7,7 +7,6 @@ from vip_bot.helpers import (
     telegram_user_link,
     internal_telegram_chat_url,
     normalize_package_code,
-    runtime_vip_chat_id,
 )
 
 def qris_caption(package, inv_id, checkout_amount, final_amount, expires):
@@ -121,14 +120,13 @@ def main_menu_keyboard_text(user, bot_name=""):
     return f"Hi {html.escape(name)}, Welcome di Bot Payment {bot_label}."
 
 
-def default_package(config, store, bot_code="default"):
-    vip_chat_id = runtime_vip_chat_id(config, store)
+def default_package(config, bot_code="default", vip_chat_id=None):
     return {
         "bot_code": bot_code,
         "code": "default",
         "name": "VIP",
         "amount": config.payment_amount,
-        "vip_chat_id": vip_chat_id,
+        "vip_chat_id": vip_chat_id or config.vip_chat_id,
         "invite_expire_hours": config.invite_expire_hours,
     }
 
@@ -137,13 +135,18 @@ def package_label(package):
     return f"{package['name']} - {format_button_amount(package['amount'])}"
 
 
-def package_buttons(config, store, bot_code="default"):
-    try:
-        packages = store.list_packages(bot_code=bot_code)
-    except Exception:
+def package_buttons(config, store_or_packages, bot_code="default", vip_chat_id=None):
+    if isinstance(store_or_packages, list):
+        packages = store_or_packages
+    elif hasattr(store_or_packages, "list_packages"):
+        res = store_or_packages.list_packages(bot_code=bot_code)
+        import inspect
+        packages = [] if inspect.iscoroutine(res) else (res or [])
+    else:
         packages = []
+
     if not packages:
-        packages = [default_package(config, store, bot_code=bot_code)]
+        packages = [default_package(config, bot_code=bot_code, vip_chat_id=vip_chat_id)]
     buttons = []
     for package in packages:
         buttons.append([Button.inline(package_label(package), data=f"pkg:{package['code']}")])
@@ -168,7 +171,7 @@ def package_list_text(packages, bot_code=None):
 def bot_list_text(bots):
     if not bots:
         return "🤖 <b>Daftar Bot Payment:</b>\n<i>Belum ada bot yang didaftarkan. Gunakan /bot_add</i>"
-    lines = ["🤖 <b>Daftar Bot Payment:</b>\n"]
+    lines = ["🤖 <b>Daftar Bot Payment Aktif:</b>\n"]
     for idx, b in enumerate(bots, 1):
         status_icon = "🟢" if b["status"] == "online" else "🔴"
         username = f"(@{b['bot_username']})" if b.get("bot_username") else ""
@@ -191,7 +194,8 @@ def admin_command_list_text():
         "• <code>/package_add &lt;nama_bot&gt; &lt;kode&gt; &lt;Nama Group&gt;|&lt;chat_id&gt;|&lt;harga&gt;</code>\n"
         "• <code>/package_list [nama_bot]</code> - List group VIP per bot\n"
         "• <code>/package_delete &lt;nama_bot&gt; &lt;kode&gt;</code> - Nonaktifkan group\n\n"
-        "⚙️ <b>Command Setting & Utilitas:</b>\n• <code>/commands</code> - Lihat daftar semua command\n"
+        "⚙️ <b>Command Setting & Utilitas:</b>\n"
+        "• <code>/commands</code> - Lihat daftar semua command\n"
         "• <code>/custom &lt;nominal&gt;</code> - Buat QRIS manual khusus admin\n"
         "• <code>/chatid</code> - Cek ID chat grup ini\n"
         "• <code>/setvip &lt;chat_id|here&gt;</code> - Set VIP chat default\n"
