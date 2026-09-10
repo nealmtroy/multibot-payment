@@ -207,3 +207,40 @@ def admin_command_list_text():
         "• <code>/test_broadcast [nama_bot]</code> - Uji broadcast per bot ke admin\n"
         "• <code>/broadcast_status [nama_bot]</code> - Cek status & jadwal broadcast tiap bot\n"
     )
+
+
+def admin_main_menu_keyboard():
+    return [
+        [Button.text("🤖 Kelola Bot Payment", resize=True), Button.text("📦 Kelola Paket VIP")],
+        [Button.text("📢 Kelola Broadcast"), Button.text("💰 Antrean Penarikan")],
+        [Button.text("📊 Status Sistem"), Button.text("⚙️ Pengaturan")],
+    ]
+
+
+def admin_bot_menu_keyboard():
+    return [
+        [Button.text("➕ Tambah Bot Baru", resize=True), Button.text("📋 Daftar Semua Bot")],
+        [Button.text("⏹️ Hentikan Bot"), Button.text("▶️ Hidupkan Bot")],
+        [Button.text("🗑️ Hapus Bot"), Button.text("🔙 Menu Utama")],
+    ]
+
+
+def admin_package_menu_keyboard():
+    return [
+        [Button.text("➕ Tambah Paket VIP", resize=True), Button.text("📑 Daftar Paket VIP")],
+        [Button.text("🗑️ Hapus Paket VIP"), Button.text("🔙 Menu Utama")],
+    ]
+
+
+def admin_broadcast_menu_keyboard():
+    return [
+        [Button.text("📝 Set Pesan Broadcast", resize=True), Button.text("⏰ Set Jadwal Broadcast")],
+        [Button.text("🧪 Test Broadcast"), Button.text("📊 Status Broadcast")],
+        [Button.text("🔙 Menu Utama")],
+    ]
+
+
+def cancel_keyboard():
+    return [
+        [Button.text("❌ Batal", resize=True)]
+    ]

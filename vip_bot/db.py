@@ -316,6 +316,21 @@ class Database:
                 )
                 return record_to_dict(row)
 
+    async def list_pending_withdrawals(self, limit: int = 20, bot_code: str = None) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            if bot_code:
+                rows = await conn.fetch(
+                    "SELECT * FROM withdrawals WHERE status = 'pending' AND bot_code = $1 ORDER BY id ASC LIMIT $2",
+                    bot_code,
+                    limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM withdrawals WHERE status = 'pending' ORDER BY id ASC LIMIT $1",
+                    limit,
+                )
+            return records_to_dicts(rows)
+
     async def get_withdrawal(self, withdrawal_id: int) -> dict | None:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM withdrawals WHERE id = $1", int(withdrawal_id))

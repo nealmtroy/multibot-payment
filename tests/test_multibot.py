@@ -113,5 +113,35 @@ class TestMultiBot(unittest.TestCase):
         asyncio.run(run_scenario())
 
 
+    def test_admin_reply_keyboards_structure(self):
+        from vip_bot.messages import (
+            admin_main_menu_keyboard,
+            admin_bot_menu_keyboard,
+            admin_package_menu_keyboard,
+            admin_broadcast_menu_keyboard,
+            cancel_keyboard,
+        )
+
+        main_kb = admin_main_menu_keyboard()
+        self.assertEqual(len(main_kb), 3)
+        self.assertEqual(main_kb[0][0].button.text, "🤖 Kelola Bot Payment")
+        self.assertEqual(main_kb[0][1].button.text, "📦 Kelola Paket VIP")
+        self.assertEqual(main_kb[1][0].button.text, "📢 Kelola Broadcast")
+        self.assertEqual(main_kb[1][1].button.text, "💰 Antrean Penarikan")
+
+        bot_kb = admin_bot_menu_keyboard()
+        self.assertEqual(bot_kb[0][0].button.text, "➕ Tambah Bot Baru")
+        self.assertEqual(bot_kb[0][1].button.text, "📋 Daftar Semua Bot")
+
+        pkg_kb = admin_package_menu_keyboard()
+        self.assertEqual(pkg_kb[0][0].button.text, "➕ Tambah Paket VIP")
+
+        bc_kb = admin_broadcast_menu_keyboard()
+        self.assertEqual(bc_kb[0][0].button.text, "📝 Set Pesan Broadcast")
+
+        c_kb = cancel_keyboard()
+        self.assertEqual(c_kb[0][0].button.text, "❌ Batal")
+
+
 if __name__ == "__main__":
     unittest.main()

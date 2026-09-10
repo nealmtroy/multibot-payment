@@ -4,6 +4,7 @@ import html
 import logging
 import re
 from telethon import events, Button, errors
+from vip_bot.config import BROADCAST_DISABLED_VALUES, BROADCAST_TIME_PATTERN
 from vip_bot.helpers import (
     is_admin,
     runtime_vip_chat_id,
@@ -18,14 +19,21 @@ from vip_bot.helpers import (
     is_sociabuzz_timeout,
     normalize_package_code,
     format_button_amount,
+    format_log_datetime,
     safe_send_user,
     entities_to_json,
+    validate_broadcast_time,
 )
 from vip_bot.messages import (
     admin_command_list_text,
     custom_qris_caption,
     package_list_text,
     bot_list_text,
+    admin_main_menu_keyboard,
+    admin_bot_menu_keyboard,
+    admin_package_menu_keyboard,
+    admin_broadcast_menu_keyboard,
+    cancel_keyboard,
 )
 from vip_bot.loops import send_broadcast_batch
 from sociabuzz_client import SociaBuzzError
@@ -73,15 +81,39 @@ def parse_package_add_args(raw):
     if not digits:
         raise ValueError("Nominal paket harus angka.")
     amount_value = int(digits)
-    if amount_value < 1000:
-        raise ValueError("Nominal paket minimal Rp1.000.")
-    if amount_value > 10_000_000:
-        raise ValueError("Nominal paket maksimal Rp10.000.000.")
-    return bot_code, normalize_package_code(code), name, int(chat_id), amount_value
+    chat_id_value = int(chat_id)
+    return bot_code, code, name, chat_id_value, amount_value
 
 
 def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_manager=None):
-    @client.on(events.NewMessage(pattern=r"^/start(?:@\w+)?(?:\s+.*)?$"))
+    # In-memory multi-step wizard state per admin: {sender_id: {"action": "...", "step": "...", "data": {...}}}
+    admin_states = {}
+
+    # -------------------------------------------------------------------------
+    # Helper: Send System Dashboard
+    # -------------------------------------------------------------------------
+    async def send_dashboard(event):
+        bots = await bot_manager.list_all() if bot_manager else []
+        active_count = sum(1 for b in bots if b["status"] == "online")
+        pending_withdrawals = len(await db.list_pending_withdrawals())
+        all_packages = await db.list_all_packages()
+
+        text = (
+            f"👋 <b>Halo Administrator!</b>\n"
+            f"Selamat datang di <b>Master Management Bot</b>.\n\n"
+            f"📊 <b>Ringkasan Sistem:</b>\n"
+            f"• Status Server: 🟢 <b>Online</b>\n"
+            f"• Bot Payment Aktif: <b>{active_count}/{len(bots)} bot</b>\n"
+            f"• Total Paket VIP: <b>{len(all_packages)} paket</b>\n"
+            f"• Antrean Tarik Saldo: <b>{pending_withdrawals} pending</b>\n\n"
+            f"Pilih menu di bawah keyboard untuk mengelola sistem secara interaktif."
+        )
+        await event.respond(text, parse_mode="html", buttons=admin_main_menu_keyboard())
+
+    # -------------------------------------------------------------------------
+    # /start or /menu: Welcome & ReplyKeyboardMarkup
+    # -------------------------------------------------------------------------
+    @client.on(events.NewMessage(pattern=r"^/(?:start|menu)(?:@\w+)?(?:\s+.*)?$"))
     async def admin_start_handler(event):
         if not is_admin(config, event.sender_id):
             if event.is_private:
@@ -91,21 +123,16 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                     parse_mode="html",
                 )
             return
+        admin_states.pop(event.sender_id, None)
+        await send_dashboard(event)
 
-        bots = await bot_manager.list_all() if bot_manager else []
-        active_count = sum(1 for b in bots if b["status"] == "online")
-        dashboard_text = (
-            f"👋 <b>Halo Admin! Selamat datang di Master Management Bot</b>\n\n"
-            f"• Status Sistem: 🟢 <b>Online</b>\n"
-            f"• Bot Payment Berjalan: <b>{active_count} bot</b>\n\n"
-            f"{admin_command_list_text()}"
-        )
-        await event.respond(dashboard_text, parse_mode="html")
-
+    # -------------------------------------------------------------------------
+    # Block unauthorized private messages
+    # -------------------------------------------------------------------------
     @client.on(events.NewMessage(func=lambda e: e.is_private and not is_admin(config, e.sender_id)))
     async def reject_unauthorized_private(event):
         text = (event.raw_text or "").strip()
-        if not text.startswith("/start"):
+        if not text.startswith(("/start", "/menu")):
             await event.respond(
                 "⛔ <b>Akses Ditolak</b>\n"
                 "Bot ini hanya dapat digunakan oleh Administrator terdaftar.",
@@ -113,231 +140,643 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
             )
 
     # -------------------------------------------------------------------------
-    # Bot Management Commands
+    # Top-Level ReplyKeyboardMarkup Menu Routing
     # -------------------------------------------------------------------------
+    @client.on(events.NewMessage(func=lambda e: is_admin(config, e.sender_id) and e.raw_text in (
+        "🤖 Kelola Bot Payment",
+        "📦 Kelola Paket VIP",
+        "📢 Kelola Broadcast",
+        "💰 Antrean Penarikan",
+        "📊 Status Sistem",
+        "⚙️ Pengaturan",
+        "🔙 Menu Utama",
+        "❌ Batal",
+    )))
+    async def admin_main_menu_router(event):
+        text = event.raw_text.strip()
 
-    @client.on(events.NewMessage(pattern=r"^/bot_add(?:@\w+)?(?:\s+(.+))?$"))
-    async def bot_add(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        if not bot_manager:
-            await event.respond("Bot Manager tidak aktif.")
-            return
-
-        raw_args = (event.pattern_match.group(1) or "").strip()
-        parts = raw_args.split()
-        if len(parts) < 2:
-            await event.respond("Format: <code>/bot_add &lt;nama_bot&gt; &lt;bot_token&gt;</code>\nContoh: <code>/bot_add botpayment1 123456789:AAHx...</code>", parse_mode="html")
-            return
-
-        bot_code = parts[0].strip().lower()
-        bot_token = parts[1].strip()
-
-        if not re.match(r"^[a-z0-9_]{3,30}$", bot_code):
-            await event.respond("Nama bot hanya boleh huruf kecil, angka, dan underscore (3-30 karakter). Contoh: <code>botpayment1</code>", parse_mode="html")
+        # Handle cancel / back to main
+        if text in ("❌ Batal", "🔙 Menu Utama"):
+            admin_states.pop(event.sender_id, None)
+            await send_dashboard(event)
             return
 
-        status_msg = await event.respond(f"⏳ Memvalidasi & menjalankan <code>{html.escape(bot_code)}</code>...", parse_mode="html")
-        try:
-            bot_data = {
-                "bot_code": bot_code,
-                "bot_token": bot_token,
-                "bot_name": bot_code,
-            }
-            res = await bot_manager.spawn_bot(bot_data)
-            username_str = f"@{res['bot_username']}" if res.get("bot_username") else "-"
-            await status_msg.edit(
-                "✅ <b>Bot Berhasil Ditambahkan & Langsung Aktif!</b>\n\n"
-                f"• Nama: <code>{html.escape(bot_code)}</code>\n"
-                f"• Username: <b>{username_str}</b>\n"
-                "• Status: 🟢 <b>Online (Running)</b>\n\n"
-                "Bot siap melayani pembayaran! Gunakan <code>/package_add</code> untuk menambahkan group VIP ke bot ini.",
-                parse_mode="html",
-            )
-            await send_log(
-                client,
-                config,
-                db,
-                (
-                    "🤖 <b>Bot Payment Baru Aktif!</b>\n"
-                    f"• Nama Bot: <b>{html.escape(res.get('bot_name', bot_code))}</b>\n"
-                    f"• Username: <b>{username_str}</b>\n"
-                    f"• Kode Bot: <code>{html.escape(bot_code)}</code>\n"
-                    f"• Ditambahkan oleh Admin: <code>{event.sender_id}</code>\n"
-                    "• Status: 🟢 Online & Siap Digunakan"
-                ),
-            )
-        except Exception as exc:
-            LOGGER.exception("Failed to add bot")
-            await status_msg.edit(f"❌ <b>Gagal menambahkan bot:</b>\n<code>{html.escape(str(exc))}</code>", parse_mode="html")
+        admin_states.pop(event.sender_id, None)
 
-    @client.on(events.NewMessage(pattern=r"^/bot_list(?:@\w+)?$"))
-    async def bot_list(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        if not bot_manager:
-            await event.respond("Bot Manager tidak aktif.")
-            return
-        bots = await bot_manager.list_all()
-        await event.respond(bot_list_text(bots), parse_mode="html")
-
-    @client.on(events.NewMessage(pattern=r"^/bot_stop(?:@\w+)?(?:\s+(.+))?$"))
-    async def bot_stop(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        if not bot_manager:
-            await event.respond("Bot Manager tidak aktif.")
-            return
-        bot_code = (event.pattern_match.group(1) or "").strip().lower()
-        if not bot_code:
-            await event.respond("Format: <code>/bot_stop &lt;nama_bot&gt;</code>", parse_mode="html")
-            return
-        stopped = await bot_manager.stop_bot(bot_code)
-        if stopped:
-            await event.respond(f"🔴 Bot <code>{html.escape(bot_code)}</code> berhasil dimatikan.", parse_mode="html")
-            await send_log(client, config, db, f"<b>Bot Stopped</b>\nCode: <code>{html.escape(bot_code)}</code>\nAdmin: <code>{event.sender_id}</code>")
-        else:
-            await event.respond(f"Bot <code>{html.escape(bot_code)}</code> tidak sedang berjalan atau tidak ditemukan.", parse_mode="html")
-
-    @client.on(events.NewMessage(pattern=r"^/bot_start(?:@\w+)?(?:\s+(.+))?$"))
-    async def bot_start(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        if not bot_manager:
-            await event.respond("Bot Manager tidak aktif.")
-            return
-        bot_code = (event.pattern_match.group(1) or "").strip().lower()
-        if not bot_code:
-            await event.respond("Format: <code>/bot_start &lt;nama_bot&gt;</code>", parse_mode="html")
-            return
-        bot_data = await db.get_bot(bot_code)
-        if not bot_data:
-            await event.respond(f"Bot <code>{html.escape(bot_code)}</code> tidak terdaftar di database.", parse_mode="html")
-            return
-        try:
-            await bot_manager.spawn_bot(bot_data)
-            await event.respond(f"🟢 Bot <code>{html.escape(bot_code)}</code> berhasil dijalankan kembali.", parse_mode="html")
-            await send_log(client, config, db, f"<b>Bot Started</b>\nCode: <code>{html.escape(bot_code)}</code>\nAdmin: <code>{event.sender_id}</code>")
-        except Exception as exc:
-            await event.respond(f"❌ Gagal menyalakan bot <code>{html.escape(bot_code)}</code>:\n<code>{html.escape(str(exc))}</code>", parse_mode="html")
-
-    @client.on(events.NewMessage(pattern=r"^/bot_delete(?:@\w+)?(?:\s+(.+))?$"))
-    async def bot_delete(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        if not bot_manager:
-            await event.respond("Bot Manager tidak aktif.")
-            return
-        bot_code = (event.pattern_match.group(1) or "").strip().lower()
-        if not bot_code:
-            await event.respond("Format: <code>/bot_delete &lt;nama_bot&gt;</code>", parse_mode="html")
-            return
-        deleted = await bot_manager.delete_bot(bot_code)
-        if deleted:
-            await event.respond(f"🗑️ Bot <code>{html.escape(bot_code)}</code> berhasil dihapus dari sistem.", parse_mode="html")
-            await send_log(client, config, db, f"<b>Bot Deleted</b>\nCode: <code>{html.escape(bot_code)}</code>\nAdmin: <code>{event.sender_id}</code>")
-        else:
-            await event.respond(f"Bot <code>{html.escape(bot_code)}</code> tidak ditemukan di database.", parse_mode="html")
-
-    # -------------------------------------------------------------------------
-    # Package Management Commands
-    # -------------------------------------------------------------------------
-
-    @client.on(events.NewMessage(pattern=r"^/package_add(?:@\w+)?(?:\s+(.+))?$"))
-    async def package_add(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        try:
-            bot_code, code, name, vip_chat_id, amount = parse_package_add_args(event.pattern_match.group(1) or "")
-            await db.upsert_package(code, name, vip_chat_id, amount, config.invite_expire_hours, bot_code=bot_code)
+        if text == "🤖 Kelola Bot Payment":
             await event.respond(
-                f"✅ <b>Group VIP Disimpan!</b>\n"
-                f"• Bot: <code>{html.escape(bot_code)}</code>\n"
-                f"• Kode: <code>{html.escape(code)}</code>\n"
-                f"• Nama: {html.escape(name)}\n"
-                f"• VIP Chat ID: <code>{vip_chat_id}</code>\n"
-                f"• Harga: <b>{format_button_amount(amount)}</b>",
+                "🤖 <b>Menu Kelola Bot Payment</b>\n\n"
+                "Pilih aksi di bawah:\n"
+                "• <b>➕ Tambah Bot Baru</b>: Hubungkan bot payment baru via Bot Token\n"
+                "• <b>📋 Daftar Semua Bot</b>: Cek status online & paket bot\n"
+                "• <b>⏹️ Hentikan Bot</b> / <b>▶️ Hidupkan Bot</b>: Kontrol status bot\n"
+                "• <b>🗑️ Hapus Bot</b>: Hapus bot dari sistem",
+                parse_mode="html",
+                buttons=admin_bot_menu_keyboard(),
+            )
+            return
+
+        if text == "📦 Kelola Paket VIP":
+            await event.respond(
+                "📦 <b>Menu Kelola Paket VIP</b>\n\n"
+                "Pilih aksi di bawah:\n"
+                "• <b>➕ Tambah Paket VIP</b>: Tambah grup VIP baru untuk bot tertentu\n"
+                "• <b>📑 Daftar Paket VIP</b>: Lihat seluruh paket per bot\n"
+                "• <b>🗑️ Hapus Paket VIP</b>: Hapus paket VIP",
+                parse_mode="html",
+                buttons=admin_package_menu_keyboard(),
+            )
+            return
+
+        if text == "📢 Kelola Broadcast":
+            await event.respond(
+                "📢 <b>Menu Kelola Broadcast Harian (Per Bot)</b>\n\n"
+                "Pilih aksi di bawah:\n"
+                "• <b>📝 Set Pesan Broadcast</b>: Simpan pesan promosi per bot\n"
+                "• <b>⏰ Set Jadwal Broadcast</b>: Atur jam kirim otomatis (WIB)\n"
+                "• <b>🧪 Test Broadcast</b>: Coba kirim pesan ke akun admin\n"
+                "• <b>📊 Status Broadcast</b>: Cek konfigurasi & target user",
+                parse_mode="html",
+                buttons=admin_broadcast_menu_keyboard(),
+            )
+            return
+
+        if text == "💰 Antrean Penarikan":
+            pending = await db.list_pending_withdrawals(limit=30)
+            if not pending:
+                await event.respond(
+                    "✅ <b>Tidak ada antrean penarikan saat ini.</b>\n"
+                    "Semua pengajuan penarikan komisi referral sudah diproses.",
+                    parse_mode="html",
+                    buttons=admin_main_menu_keyboard(),
+                )
+                return
+
+            await event.respond(
+                f"💰 <b>Ada {len(pending)} Pengajuan Penarikan Pending:</b>",
                 parse_mode="html",
             )
-            await send_log(
-                client,
-                config,
-                db,
-                (
-                    "<b>Package updated</b>\n"
-                    f"Bot: <code>{html.escape(bot_code)}</code>\n"
-                    f"Code: <code>{html.escape(code)}</code>\n"
-                    f"Name: <code>{html.escape(name)}</code>\n"
-                    f"VIP chat: <code>{vip_chat_id}</code>\n"
-                    f"Amount: <code>{amount}</code>\n"
-                    f"Admin: <code>{event.sender_id}</code>"
-                ),
+            for w in pending:
+                card = (
+                    f"💳 <b>Penarikan #{w['id']}</b> [{html.escape(w.get('bot_code', 'default'))}]\n"
+                    f"• Pemohon: <b>{html.escape(w.get('full_name') or str(w['user_id']))}</b> (<code>{w['user_id']}</code>)\n"
+                    f"• Nominal: <b>{format_rupiah(w['amount'])}</b>\n"
+                    f"• No HP: <code>{html.escape(w.get('phone', ''))}</code>\n"
+                    f"• E-Wallet: <b>{html.escape(w.get('wallet_name', ''))}</b>\n"
+                    f"• Atas Nama: <b>{html.escape(w.get('account_name', ''))}</b>\n"
+                    f"• Waktu: <code>{format_log_datetime(w.get('created_at'))}</code>"
+                )
+                action_buttons = [
+                    [
+                        Button.inline("✅ Setujui (Approve)", data=f"adm_appr:{w['id']}"),
+                        Button.inline("❌ Tolak (Reject)", data=f"adm_rejc:{w['id']}"),
+                    ]
+                ]
+                await event.respond(card, parse_mode="html", buttons=action_buttons)
+            return
+
+        if text == "📊 Status Sistem":
+            bots = await bot_manager.list_all() if bot_manager else []
+            active_count = sum(1 for b in bots if b["status"] == "online")
+            packages = await db.list_all_packages()
+            pending = await db.list_pending_withdrawals()
+            vip_id = await runtime_vip_chat_id(config, db)
+            log_id = await runtime_log_chat_id(config, db)
+
+            status_text = (
+                f"📊 <b>STATUS SISTEM MULTIBOT PAYMENT</b>\n\n"
+                f"• Master Bot: @{client.bot_username}\n"
+                f"• Database: <b>PostgreSQL (Active)</b>\n"
+                f"• Bot Payment Aktif: <b>{active_count}/{len(bots)}</b>\n"
+                f"• Total Paket VIP: <b>{len(packages)}</b>\n"
+                f"• Pending Penarikan: <b>{len(pending)}</b>\n\n"
+                f"⚙️ <b>Konfigurasi Runtime:</b>\n"
+                f"• LOG_CHAT_ID: <code>{log_id or '-'}</code>\n"
+                f"• VIP_CHAT_ID (Fallback): <code>{vip_id or '-'}</code>\n"
+                f"• Gateway: SociaBuzz (<code>{config.sociabuzz_username}</code>)"
             )
-        except Exception as exc:
-            LOGGER.exception("Failed to add package")
-            await event.respond(f"Gagal tambah paket: {html.escape(str(exc))}")
+            await event.respond(status_text, parse_mode="html", buttons=admin_main_menu_keyboard())
+            return
 
-    @client.on(events.NewMessage(pattern=r"^/package_list(?:@\w+)?(?:\s+(.+))?$"))
-    async def package_list(event):
-        if not await require_admin_logchat(event, config, db):
+        if text == "⚙️ Pengaturan":
+            log_id = await runtime_log_chat_id(config, db)
+            vip_id = await runtime_vip_chat_id(config, db)
+            settings_text = (
+                f"⚙️ <b>PENGATURAN RUNTIME</b>\n\n"
+                f"• <b>LOG_CHAT_ID</b>: <code>{log_id or '-'}</code>\n"
+                f"• <b>VIP_CHAT_ID</b>: <code>{vip_id or '-'}</code>\n\n"
+                f"Klik tombol di bawah untuk memperbarui setting:"
+            )
+            buttons = [
+                [Button.inline("📝 Ubah LOG_CHAT_ID", b"adm_cfg:log_chat_id")],
+                [Button.inline("📝 Ubah VIP_CHAT_ID", b"adm_cfg:vip_chat_id")],
+            ]
+            await event.respond(settings_text, parse_mode="html", buttons=buttons)
             return
-        bot_code = (event.pattern_match.group(1) or "").strip().lower() or None
-        packages = await db.list_all_packages(bot_code=bot_code)
-        await event.respond(package_list_text(packages, bot_code=bot_code), parse_mode="html")
 
-    @client.on(events.NewMessage(pattern=r"^/package_delete(?:@\w+)?(?:\s+(.+))?$"))
-    async def package_delete(event):
-        if not await require_admin_logchat(event, config, db):
+    # -------------------------------------------------------------------------
+    # Submenu Buttons Routing (Kelola Bot Payment)
+    # -------------------------------------------------------------------------
+    @client.on(events.NewMessage(func=lambda e: is_admin(config, e.sender_id) and e.raw_text in (
+        "➕ Tambah Bot Baru",
+        "📋 Daftar Semua Bot",
+        "⏹️ Hentikan Bot",
+        "▶️ Hidupkan Bot",
+        "🗑️ Hapus Bot",
+    )))
+    async def admin_bot_actions(event):
+        text = event.raw_text.strip()
+
+        if text == "📋 Daftar Semua Bot":
+            if not bot_manager:
+                await event.respond("Bot Manager belum aktif.")
+                return
+            bots = await bot_manager.list_all()
+            await event.respond(bot_list_text(bots), parse_mode="html")
             return
-        raw = (event.pattern_match.group(1) or "").strip()
-        if not raw:
-            await event.respond("Format: <code>/package_delete &lt;nama_bot&gt; &lt;kode&gt;</code>", parse_mode="html")
+
+        if text == "➕ Tambah Bot Baru":
+            admin_states[event.sender_id] = {
+                "action": "add_bot",
+                "step": "code",
+                "data": {},
+            }
+            await event.respond(
+                "🤖 <b>Tambah Bot Payment Baru (Langkah 1/2)</b>\n\n"
+                "Ketik <b>nama/kode bot</b> yang unik (hanya huruf kecil, angka, dan underscore).\n"
+                "Contoh: <code>botpayment1</code>\n\n"
+                "<i>Klik tombol <b>❌ Batal</b> di bawah jika ingin membatalkan.</i>",
+                parse_mode="html",
+                buttons=cancel_keyboard(),
+            )
             return
-        tokens = raw.split()
-        if len(tokens) >= 2:
-            bot_code = tokens[0].lower()
-            code = tokens[1]
-        else:
-            bot_code = "default"
-            code = tokens[0]
-        try:
-            normalized = normalize_package_code(code)
-            changed = await db.delete_package(normalized, bot_code=bot_code)
-            if changed:
-                await event.respond(f"Paket <code>{html.escape(normalized)}</code> ({html.escape(bot_code)}) dinonaktifkan.", parse_mode="html")
-                await send_log(
-                    client,
-                    config,
-                    db,
-                    f"<b>Package disabled</b>\nBot: <code>{html.escape(bot_code)}</code>\nCode: <code>{html.escape(normalized)}</code>\nAdmin: <code>{event.sender_id}</code>",
+
+        if text == "⏹️ Hentikan Bot":
+            bots = await bot_manager.list_all() if bot_manager else []
+            online_bots = [b for b in bots if b["status"] == "online"]
+            if not online_bots:
+                await event.respond("Tidak ada bot payment yang sedang online.")
+                return
+            buttons = [
+                [Button.inline(f"⏹️ Hentikan {b['bot_code']}", data=f"adm_stop:{b['bot_code']}")]
+                for b in online_bots
+            ]
+            await event.respond("Pilih bot yang ingin dihentikan:", buttons=buttons)
+            return
+
+        if text == "▶️ Hidupkan Bot":
+            bots = await bot_manager.list_all() if bot_manager else []
+            stopped_bots = [b for b in bots if b["status"] != "online"]
+            if not stopped_bots:
+                await event.respond("Semua bot payment sudah dalam status online.")
+                return
+            buttons = [
+                [Button.inline(f"▶️ Hidupkan {b['bot_code']}", data=f"adm_start:{b['bot_code']}")]
+                for b in stopped_bots
+            ]
+            await event.respond("Pilih bot yang ingin dihidupkan kembali:", buttons=buttons)
+            return
+
+        if text == "🗑️ Hapus Bot":
+            bots = await bot_manager.list_all() if bot_manager else []
+            if not bots:
+                await event.respond("Belum ada bot yang terdaftar.")
+                return
+            buttons = [
+                [Button.inline(f"🗑️ Hapus {b['bot_code']}", data=f"adm_delbot:{b['bot_code']}")]
+                for b in bots
+            ]
+            await event.respond("Pilih bot yang ingin dihapus permanen:", buttons=buttons)
+            return
+
+    # -------------------------------------------------------------------------
+    # Submenu Buttons Routing (Kelola Paket VIP)
+    # -------------------------------------------------------------------------
+    @client.on(events.NewMessage(func=lambda e: is_admin(config, e.sender_id) and e.raw_text in (
+        "➕ Tambah Paket VIP",
+        "📑 Daftar Paket VIP",
+        "🗑️ Hapus Paket VIP",
+    )))
+    async def admin_package_actions(event):
+        text = event.raw_text.strip()
+
+        if text == "📑 Daftar Paket VIP":
+            packages = await db.list_all_packages()
+            await event.respond(package_list_text(packages), parse_mode="html")
+            return
+
+        if text == "➕ Tambah Paket VIP":
+            bots = await bot_manager.list_all() if bot_manager else []
+            if not bots:
+                await event.respond("Belum ada bot payment terdaftar. Silakan tambahkan bot payment terlebih dahulu.")
+                return
+
+            if len(bots) == 1:
+                # Auto select single bot
+                admin_states[event.sender_id] = {
+                    "action": "add_package",
+                    "step": "code",
+                    "data": {"bot_code": bots[0]["bot_code"]},
+                }
+                await event.respond(
+                    f"📦 <b>Tambah Paket VIP untuk [{bots[0]['bot_code']}] (Langkah 1/4)</b>\n\n"
+                    f"Ketik <b>kode paket</b> (huruf kecil & angka tanpa spasi).\n"
+                    f"Contoh: <code>vip1</code>",
+                    parse_mode="html",
+                    buttons=cancel_keyboard(),
                 )
             else:
-                await event.respond("Paket tidak ditemukan atau sudah nonaktif.")
-        except Exception as exc:
-            LOGGER.exception("Failed to delete package")
-            await event.respond("Gagal hapus paket. Detail error dikirim ke log admin.")
-            await send_log(client, config, db, f"<b>Package delete error</b>\nAdmin: <code>{event.sender_id}</code>\n<code>{html.escape(str(exc))}</code>")
+                buttons = [
+                    [Button.inline(f"🤖 {b['bot_code']}", data=f"adm_addpkg_bot:{b['bot_code']}")]
+                    for b in bots
+                ]
+                await event.respond("Pilih bot payment yang ingin ditambahkan paket VIP:", buttons=buttons)
+            return
+
+        if text == "🗑️ Hapus Paket VIP":
+            packages = await db.list_all_packages()
+            if not packages:
+                await event.respond("Belum ada paket VIP yang terdaftar.")
+                return
+            buttons = [
+                [Button.inline(f"🗑️ {p['code']} ({p['bot_code']}) - {format_button_amount(p['amount'])}", data=f"adm_delpkg:{p['bot_code']}:{p['code']}")]
+                for p in packages
+            ]
+            await event.respond("Pilih paket VIP yang ingin dihapus:", buttons=buttons)
+            return
 
     # -------------------------------------------------------------------------
-    # Withdrawal Admin Actions
+    # Submenu Buttons Routing (Kelola Broadcast)
     # -------------------------------------------------------------------------
+    @client.on(events.NewMessage(func=lambda e: is_admin(config, e.sender_id) and e.raw_text in (
+        "📝 Set Pesan Broadcast",
+        "⏰ Set Jadwal Broadcast",
+        "🧪 Test Broadcast",
+        "📊 Status Broadcast",
+    )))
+    async def admin_broadcast_actions(event):
+        text = event.raw_text.strip()
 
-    @client.on(events.CallbackQuery(pattern=rb"^withdraw_(done|reject):(\d+)$"))
-    async def withdrawal_admin_action(event):
+        if text == "📊 Status Broadcast":
+            bots = await bot_manager.list_all() if bot_manager else []
+            bot_codes = ["default"] + [b["bot_code"] for b in bots if b["bot_code"] != "default"]
+
+            lines = ["📢 <b>Status Konfigurasi Broadcast Multi-Bot:</b>\n"]
+            for b_code in bot_codes:
+                b_time = await db.get_broadcast_time(bot_code=b_code) or "OFF"
+                last_date = await db.get_last_broadcast_date(bot_code=b_code) or "-"
+                msg = await db.get_active_broadcast_message(bot_code=b_code)
+                user_count = await db.count_broadcast_targets(bot_code=b_code)
+                msg_status = "✅ Ada" if msg else "❌ Belum diset"
+                if msg and msg.get("media_type"):
+                    msg_status += f" ({msg['media_type']})"
+
+                lines.append(
+                    f"🤖 <b>{html.escape(b_code)}</b>:\n"
+                    f"• Jadwal: <b>{html.escape(b_time)} WIB</b>\n"
+                    f"• Pesan: {msg_status}\n"
+                    f"• Terakhir Kirim: <code>{html.escape(last_date)}</code>\n"
+                    f"• Target Member: <b>{user_count} orang</b>\n"
+                )
+            await event.respond("\n".join(lines), parse_mode="html")
+            return
+
+        bots = await bot_manager.list_all() if bot_manager else []
+        bot_codes = [b["bot_code"] for b in bots]
+        if not bot_codes:
+            bot_codes = ["default"]
+
+        if text == "📝 Set Pesan Broadcast":
+            if len(bot_codes) == 1:
+                admin_states[event.sender_id] = {
+                    "action": "set_broadcast_msg",
+                    "step": "message",
+                    "data": {"bot_code": bot_codes[0]},
+                }
+                await event.respond(
+                    f"📢 <b>Set Pesan Broadcast untuk [{bot_codes[0]}]</b>\n\n"
+                    f"Kirimkan pesan teks atau media (foto/video) yang ingin dijadikan materi broadcast.\n"
+                    f"Formatting (Bold, Italic, Link) akan tersimpan otomatis.",
+                    parse_mode="html",
+                    buttons=cancel_keyboard(),
+                )
+            else:
+                buttons = [
+                    [Button.inline(f"🤖 {code}", data=f"adm_setbc_bot:{code}")]
+                    for code in bot_codes
+                ]
+                await event.respond("Pilih bot yang ingin diset pesan broadcastnya:", buttons=buttons)
+            return
+
+        if text == "⏰ Set Jadwal Broadcast":
+            if len(bot_codes) == 1:
+                admin_states[event.sender_id] = {
+                    "action": "set_broadcast_time",
+                    "step": "time",
+                    "data": {"bot_code": bot_codes[0]},
+                }
+                quick_time_keyboard = [
+                    [Button.text("09:00", resize=True), Button.text("12:00"), Button.text("15:00")],
+                    [Button.text("19:00"), Button.text("21:00"), Button.text("off")],
+                    [Button.text("❌ Batal")],
+                ]
+                await event.respond(
+                    f"⏰ <b>Atur Jadwal Broadcast [{bot_codes[0]}]</b>\n\n"
+                    f"Pilih jam cepat di bawah atau ketik jam manual (format <code>HH:MM</code>, contoh <code>09:30</code> WIB).\n"
+                    f"Ketik <code>off</code> untuk menonaktifkan broadcast otomatis.",
+                    parse_mode="html",
+                    buttons=quick_time_keyboard,
+                )
+            else:
+                buttons = [
+                    [Button.inline(f"🤖 {code}", data=f"adm_setbct_bot:{code}")]
+                    for code in bot_codes
+                ]
+                await event.respond("Pilih bot yang ingin diatur jadwal broadcastnya:", buttons=buttons)
+            return
+
+        if text == "🧪 Test Broadcast":
+            buttons = [
+                [Button.inline(f"🧪 Test {code}", data=f"adm_testbc_bot:{code}")]
+                for code in bot_codes
+            ]
+            await event.respond("Pilih bot yang ingin diuji coba broadcastnya:", buttons=buttons)
+            return
+
+    # -------------------------------------------------------------------------
+    # Multi-Step Input Handler (Captures Text & Media during Active Wizard)
+    # -------------------------------------------------------------------------
+    @client.on(events.NewMessage(func=lambda e: is_admin(config, e.sender_id) and e.sender_id in admin_states))
+    async def admin_multistep_input_processor(event):
+        state = admin_states.get(event.sender_id)
+        if not state:
+            return
+
+        raw_text = (event.raw_text or "").strip()
+        action = state.get("action")
+        step = state.get("step")
+
+        # ---------------------------------------------------------------------
+        # Wizard: Add Bot
+        # ---------------------------------------------------------------------
+        if action == "add_bot":
+            if step == "code":
+                code = raw_text.lower()
+                if not re.match(r"^[a-z0-9_]{3,30}$", code):
+                    await event.respond(
+                        "⚠️ <b>Kode bot tidak valid.</b>\n"
+                        "Gunakan hanya huruf kecil, angka, dan underscore (3-30 karakter).\n"
+                        "Contoh: <code>botpayment1</code>",
+                        parse_mode="html",
+                        buttons=cancel_keyboard(),
+                    )
+                    return
+                state["data"]["bot_code"] = code
+                state["step"] = "token"
+                await event.respond(
+                    f"🤖 <b>Tambah Bot Payment Baru (Langkah 2/2)</b>\n\n"
+                    f"Kode Bot: <code>{code}</code>\n\n"
+                    f"Sekarang kirimkan <b>Bot Token</b> dari @BotFather.\n"
+                    f"Contoh: <code>123456789:AAHx...</code>",
+                    parse_mode="html",
+                    buttons=cancel_keyboard(),
+                )
+                return
+
+            if step == "token":
+                token = raw_text.strip()
+                code = state["data"]["bot_code"]
+                status_msg = await event.respond(
+                    f"⏳ Sedang memvalidasi token dan menghubungkan <code>{code}</code> ke Telegram...",
+                    parse_mode="html",
+                )
+                try:
+                    res = await bot_manager.spawn_bot({
+                        "bot_code": code,
+                        "bot_token": token,
+                        "bot_name": code,
+                    })
+                    admin_states.pop(event.sender_id, None)
+
+                    # Notify LOG_CHAT_ID
+                    await send_log(
+                        client,
+                        config,
+                        db,
+                        (
+                            "🤖 <b>Bot Payment Baru Aktif!</b>\n"
+                            f"• Nama Bot: <b>{html.escape(res.get('bot_name', code))}</b>\n"
+                            f"• Username: @{html.escape(res.get('bot_username', ''))}\n"
+                            f"• Kode Bot: <code>{html.escape(code)}</code>\n"
+                            f"• Ditambahkan oleh: <code>{event.sender_id}</code>\n"
+                            "• Status: 🟢 Online & Siap Digunakan"
+                        ),
+                    )
+
+                    await status_msg.edit(
+                        f"✅ <b>Bot Payment Berhasil Ditambahkan & Langsung Aktif!</b>\n\n"
+                        f"• Kode: <code>{html.escape(code)}</code>\n"
+                        f"• Username: @{html.escape(res.get('bot_username', ''))}\n"
+                        f"• Status: 🟢 <b>Online (Running)</b>\n\n"
+                        f"Bot siap melayani pembayaran! Kamu bisa menambahkan paket VIP untuk bot ini melalui menu <b>📦 Kelola Paket VIP</b>.",
+                        parse_mode="html",
+                    )
+                    await event.respond("Pilih menu:", buttons=admin_main_menu_keyboard())
+                except Exception as exc:
+                    LOGGER.exception("Error spawning bot %s", code)
+                    await status_msg.edit(
+                        f"❌ <b>Gagal menghubungkan bot:</b>\n<code>{html.escape(str(exc))}</code>\n\n"
+                        f"Pastikan token benar, atau klik <b>❌ Batal</b> untuk keluar.",
+                        parse_mode="html",
+                        buttons=cancel_keyboard(),
+                    )
+                return
+
+        # ---------------------------------------------------------------------
+        # Wizard: Add Package
+        # ---------------------------------------------------------------------
+        if action == "add_package":
+            bot_code = state["data"]["bot_code"]
+            if step == "code":
+                try:
+                    pkg_code = normalize_package_code(raw_text)
+                except ValueError as err:
+                    await event.respond(f"⚠️ {err}\nMasukkan kode paket (contoh: <code>vip1</code>):", parse_mode="html", buttons=cancel_keyboard())
+                    return
+                state["data"]["code"] = pkg_code
+                state["step"] = "name"
+                await event.respond(
+                    f"📦 <b>Tambah Paket VIP [{bot_code}] (Langkah 2/4)</b>\n\n"
+                    f"Kode: <code>{pkg_code}</code>\n\n"
+                    f"Masukkan <b>nama grup/channel VIP</b>.\n"
+                    f"Contoh: <code>Group VIP Premium 1 Bulan</code>",
+                    parse_mode="html",
+                    buttons=cancel_keyboard(),
+                )
+                return
+
+            if step == "name":
+                if not raw_text:
+                    await event.respond("Nama paket tidak boleh kosong. Masukkan nama paket:", buttons=cancel_keyboard())
+                    return
+                state["data"]["name"] = raw_text
+                state["step"] = "chat_id"
+                await event.respond(
+                    f"📦 <b>Tambah Paket VIP [{bot_code}] (Langkah 3/4)</b>\n\n"
+                    f"Nama: <b>{html.escape(raw_text)}</b>\n\n"
+                    f"Masukkan <b>Chat ID Group/Channel VIP Telegram</b> (biasanya berawalan <code>-100...</code>).\n"
+                    f"Contoh: <code>-100192837465</code>",
+                    parse_mode="html",
+                    buttons=cancel_keyboard(),
+                )
+                return
+
+            if step == "chat_id":
+                try:
+                    vip_chat_id = int(raw_text)
+                except ValueError:
+                    await event.respond("Chat ID harus angka (contoh: <code>-100192837465</code>):", parse_mode="html", buttons=cancel_keyboard())
+                    return
+                state["data"]["vip_chat_id"] = vip_chat_id
+                state["step"] = "amount"
+                await event.respond(
+                    f"📦 <b>Tambah Paket VIP [{bot_code}] (Langkah 4/4)</b>\n\n"
+                    f"Chat ID: <code>{vip_chat_id}</code>\n\n"
+                    f"Masukkan <b>harga paket</b> dalam Rupiah (angka saja).\n"
+                    f"Contoh: <code>50000</code>",
+                    parse_mode="html",
+                    buttons=cancel_keyboard(),
+                )
+                return
+
+            if step == "amount":
+                digits = "".join(ch for ch in raw_text if ch.isdigit())
+                if not digits:
+                    await event.respond("Harga harus berupa angka. Masukkan harga paket:", buttons=cancel_keyboard())
+                    return
+                amount = int(digits)
+                data = state["data"]
+                admin_states.pop(event.sender_id, None)
+
+                try:
+                    await db.upsert_package(
+                        code=data["code"],
+                        name=data["name"],
+                        vip_chat_id=data["vip_chat_id"],
+                        amount=amount,
+                        bot_code=bot_code,
+                    )
+                    await event.respond(
+                        f"✅ <b>Paket VIP Berhasil Disimpan!</b>\n\n"
+                        f"• Bot: <b>{html.escape(bot_code)}</b>\n"
+                        f"• Kode Paket: <code>{html.escape(data['code'])}</code>\n"
+                        f"• Nama: <b>{html.escape(data['name'])}</b>\n"
+                        f"• VIP Chat ID: <code>{data['vip_chat_id']}</code>\n"
+                        f"• Harga: <b>{format_rupiah(amount)}</b>",
+                        parse_mode="html",
+                        buttons=admin_main_menu_keyboard(),
+                    )
+                except Exception as exc:
+                    LOGGER.exception("Error saving package")
+                    await event.respond(f"❌ Gagal menyimpan paket: {html.escape(str(exc))}", buttons=admin_main_menu_keyboard())
+                return
+
+        # ---------------------------------------------------------------------
+        # Wizard: Set Broadcast Message
+        # ---------------------------------------------------------------------
+        if action == "set_broadcast_msg":
+            bot_code = state["data"]["bot_code"]
+            text_content = event.raw_text or ""
+            media_file_id = getattr(getattr(event, "file", None), "id", "") or ""
+            media_type = getattr(getattr(event, "file", None), "mime_type", "") or ""
+            if not text_content and not media_file_id:
+                await event.respond("Pesan harus memiliki teks atau media. Silakan kirimkan kembali:", buttons=cancel_keyboard())
+                return
+
+            admin_states.pop(event.sender_id, None)
+            entities_json = entities_to_json(event.entities or [])
+            await db.set_broadcast_message(
+                text_content, media_file_id, media_type, entities_json, bot_code=bot_code
+            )
+            await event.respond(
+                f"✅ <b>Pesan broadcast untuk bot <code>{html.escape(bot_code)}</code> berhasil disimpan!</b>\n\n"
+                f"Kamu bisa menguji pengiriman lewat menu <b>📢 Kelola Broadcast -> 🧪 Test Broadcast</b>.",
+                parse_mode="html",
+                buttons=admin_main_menu_keyboard(),
+            )
+            return
+
+        # ---------------------------------------------------------------------
+        # Wizard: Set Broadcast Time
+        # ---------------------------------------------------------------------
+        if action == "set_broadcast_time":
+            bot_code = state["data"]["bot_code"]
+            raw_time = raw_text.lower()
+            try:
+                time_value = validate_broadcast_time(raw_time)
+            except ValueError:
+                await event.respond("Format jam salah. Gunakan `HH:MM` (contoh `09:30`) atau `off`:", buttons=cancel_keyboard())
+                return
+
+            admin_states.pop(event.sender_id, None)
+            await db.set_broadcast_time(time_value, bot_code=bot_code)
+            await db.set_last_broadcast_date("", bot_code=bot_code)
+            if not time_value:
+                await event.respond(
+                    f"✅ Broadcast otomatis untuk bot <b>{html.escape(bot_code)}</b> dinonaktifkan.",
+                    parse_mode="html",
+                    buttons=admin_main_menu_keyboard(),
+                )
+            else:
+                await event.respond(
+                    f"✅ Broadcast otomatis untuk bot <b>{html.escape(bot_code)}</b> dijadwalkan setiap <b>{html.escape(time_value)} WIB</b>.",
+                    parse_mode="html",
+                    buttons=admin_main_menu_keyboard(),
+                )
+            return
+
+        # ---------------------------------------------------------------------
+        # Wizard: Runtime Settings
+        # ---------------------------------------------------------------------
+        if action == "set_config":
+            setting_key = state["data"]["key"]
+            try:
+                int_val = int(raw_text)
+                await db.set_setting(setting_key, str(int_val))
+                admin_states.pop(event.sender_id, None)
+                await event.respond(
+                    f"✅ Pengaturan <code>{setting_key}</code> berhasil diubah menjadi <code>{int_val}</code>.",
+                    parse_mode="html",
+                    buttons=admin_main_menu_keyboard(),
+                )
+            except ValueError:
+                await event.respond("Nilai harus berupa angka chat ID Telegram:", buttons=cancel_keyboard())
+            return
+
+    # -------------------------------------------------------------------------
+    # Callback Query Handlers (Inline Buttons)
+    # -------------------------------------------------------------------------
+    @client.on(events.CallbackQuery())
+    async def admin_callback_dispatcher(event):
         if not is_admin(config, event.sender_id):
             await event.answer("Khusus admin.", alert=True)
             return
-        action = event.pattern_match.group(1).decode()
-        withdrawal_id = event.pattern_match.group(2).decode()
-        status = "completed" if action == "done" else "rejected"
-        label = "berhasil diproses" if action == "done" else "ditolak"
-        try:
-            withdrawal = await db.update_withdrawal_status(withdrawal_id, "pending", status, event.sender_id)
-            if not withdrawal:
-                await event.answer("Pengajuan sudah diproses.", alert=True)
-                return
-            await event.answer(f"Withdrawal {label}.")
 
+        data = event.data.decode(errors="ignore")
+
+        # 1. Approve Withdrawal
+        if data.startswith("adm_appr:"):
+            w_id = int(data.split(":")[1])
+            withdrawal = await db.update_withdrawal_status(w_id, "pending", "completed", event.sender_id)
+            if not withdrawal:
+                await event.answer("Pengajuan sudah pernah diproses.", alert=True)
+                return
+            await event.answer("Withdrawal disetujui.")
+            await event.edit(
+                f"✅ <b>Withdrawal #{w_id} Disetujui (Completed)</b>\n"
+                f"Diproses oleh Admin: <code>{event.sender_id}</code>",
+                parse_mode="html",
+            )
             bot_code = withdrawal.get("bot_code") or "default"
             target_client = bot_manager.get_client(bot_code) if bot_manager else client
             await safe_send_user(
@@ -345,227 +784,208 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                 config,
                 db,
                 withdrawal["user_id"],
-                f"Pengajuan penarikan saldo {format_rupiah(withdrawal['amount'])} {label} oleh admin.",
-            )
-            message = await event.get_message()
-            await event.edit(
-                f"{message.raw_text}\n\nStatus: <b>{html.escape(status)}</b>\nAdmin: <code>{event.sender_id}</code>",
-                parse_mode="html",
-                buttons=None,
-            )
-        except Exception as exc:
-            LOGGER.exception("Withdrawal admin action error")
-            await event.answer("Gagal memproses withdrawal. Cek log.", alert=True)
-            await send_log(client, config, db, f"<b>Withdrawal admin action error</b>\nID: <code>{html.escape(withdrawal_id)}</code>\n<code>{html.escape(str(exc))}</code>")
-
-    # -------------------------------------------------------------------------
-    # Utility Commands
-    # -------------------------------------------------------------------------
-
-    @client.on(events.NewMessage(pattern=r"^/chatid(?:@\w+)?$"))
-    async def chat_id(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        await event.respond(f"chat_id: `{event.chat_id}`")
-
-    @client.on(events.NewMessage(pattern=r"^/setvip(?:@\w+)?(?:\s+(.+))?$"))
-    async def set_vip(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        raw_value = event.pattern_match.group(1)
-        if not raw_value:
-            await event.respond("Format: `/setvip <chat_id>` atau `/setvip here`")
-            return
-        try:
-            chat_id_value = parse_chat_setting(event, raw_value)
-            await db.set_setting("vip_chat_id", chat_id_value)
-            await event.respond(f"VIP chat default diset ke `{chat_id_value}`.")
-            await send_log(client, config, db, f"<b>Config updated</b>\n<code>vip_chat_id={chat_id_value}</code>")
-        except Exception as exc:
-            LOGGER.exception("Failed to set VIP chat")
-            await event.respond("Gagal set VIP chat.")
-
-    @client.on(events.NewMessage(pattern=r"^/setlog(?:@\w+)?(?:\s+(.+))?$"))
-    async def set_log(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        raw_value = event.pattern_match.group(1)
-        if not raw_value:
-            await event.respond("Format: `/setlog <chat_id>` atau `/setlog here`")
-            return
-        try:
-            chat_id_value = parse_chat_setting(event, raw_value)
-            await db.set_setting("log_chat_id", chat_id_value)
-            await event.respond(f"Log chat diset ke `{chat_id_value}`.")
-            await send_log(client, config, db, f"<b>Config updated</b>\n<code>log_chat_id={chat_id_value}</code>")
-        except Exception as exc:
-            LOGGER.exception("Failed to set log chat")
-            await event.respond("Gagal set log chat.")
-
-    @client.on(events.NewMessage(pattern=r"^/config(?:@\w+)?$"))
-    async def show_config(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        vip_chat_id = await runtime_vip_chat_id(config, db)
-        log_chat_id = await runtime_log_chat_id(config, db)
-        total_bots = len(bot_manager.active_bots) if bot_manager else 1
-        await event.respond(
-            "Config aktif:\n"
-            f"VIP_CHAT_ID: `{vip_chat_id or 'belum diset'}`\n"
-            f"LOG_CHAT_ID: `{log_chat_id or 'belum diset'}`\n"
-            f"ACTIVE_BOTS: `{total_bots}`\n"
-            f"PAYMENT_AMOUNT: `{config.payment_amount}`\n"
-            f"INVITE_EXPIRE_HOURS: `{config.invite_expire_hours}`"
-        )
-
-    @client.on(events.NewMessage(pattern=r"^/commands?(?:@\w+)?$"))
-    async def commands(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        await event.respond(admin_command_list_text(), parse_mode="html")
-
-    @client.on(events.NewMessage(pattern=r"^/set_broadcast(?:@\w+)?(?:\s+(\S+))?$"))
-    async def set_broadcast(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        bot_code = (event.pattern_match.group(1) or "default").strip()
-        replied = await event.get_reply_message()
-        if not replied:
-            await event.respond(
-                f"Balas (reply) ke pesan yang mau dijadikan broadcast untuk bot <b>{html.escape(bot_code)}</b>.\n"
-                f"Contoh: reply pesan lalu kirim <code>/set_broadcast {html.escape(bot_code)}</code>",
+                f"🎉 Penarikan saldo sebesar <b>{format_rupiah(withdrawal['amount'])}</b> berhasil ditransfer ke akun E-Wallet kamu!",
                 parse_mode="html",
             )
             return
-        text = replied.raw_text or ""
-        media_file_id = getattr(getattr(replied, "file", None), "id", "") or ""
-        media_type = getattr(getattr(replied, "file", None), "mime_type", "") or ""
-        if not text and not media_file_id:
-            await event.respond("Pesan harus memiliki teks atau media.")
-            return
-        saved = await db.set_broadcast_message(
-            text, media_file_id, media_type, entities_to_json(replied.entities or []), bot_code=bot_code
-        )
-        await event.respond(
-            f"✅ <b>Pesan broadcast untuk bot <code>{html.escape(bot_code)}</code> berhasil disimpan!</b>\n\n"
-            f"• Uji coba: <code>/test_broadcast {html.escape(bot_code)}</code>\n"
-            f"• Atur jadwal harian: <code>/set_broadcasttime {html.escape(bot_code)} 09:00</code>",
-            parse_mode="html",
-        )
 
-    @client.on(events.NewMessage(pattern=r"^/set_broadcasttime(?:@\w+)?(?:\s+(.+))?$"))
-    async def set_broadcast_time(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        raw_value = (event.pattern_match.group(1) or "").strip()
-        from vip_bot.helpers import validate_broadcast_time
-        parts = raw_value.split()
-        
-        if len(parts) == 1:
-            val = parts[0].lower()
-            if val in BROADCAST_DISABLED_VALUES or BROADCAST_TIME_PATTERN.fullmatch(val):
-                bot_code = "default"
-                raw_time = val
-            else:
-                await event.respond(
-                    "Format:\n"
-                    "• <code>/set_broadcasttime &lt;bot_code&gt; HH:MM</code> (contoh: <code>/set_broadcasttime botpayment1 09:00</code>)\n"
-                    "• <code>/set_broadcasttime &lt;bot_code&gt; off</code>",
-                    parse_mode="html",
-                )
+        # 2. Reject Withdrawal
+        if data.startswith("adm_rejc:"):
+            w_id = int(data.split(":")[1])
+            withdrawal = await db.update_withdrawal_status(w_id, "pending", "rejected", event.sender_id)
+            if not withdrawal:
+                await event.answer("Pengajuan sudah pernah diproses.", alert=True)
                 return
-        elif len(parts) >= 2:
-            bot_code = parts[0]
-            raw_time = parts[1]
-        else:
-            await event.respond(
-                "Format:\n"
-                "• <code>/set_broadcasttime &lt;bot_code&gt; HH:MM</code> (contoh: <code>/set_broadcasttime botpayment1 09:00</code>)\n"
-                "• <code>/set_broadcasttime &lt;bot_code&gt; off</code>",
+            await event.answer("Withdrawal ditolak.")
+            await event.edit(
+                f"❌ <b>Withdrawal #{w_id} Ditolak (Saldo Dikembalikan)</b>\n"
+                f"Diproses oleh Admin: <code>{event.sender_id}</code>",
+                parse_mode="html",
+            )
+            bot_code = withdrawal.get("bot_code") or "default"
+            target_client = bot_manager.get_client(bot_code) if bot_manager else client
+            await safe_send_user(
+                target_client,
+                config,
+                db,
+                withdrawal["user_id"],
+                f"⚠️ Pengajuan penarikan saldo sebesar <b>{format_rupiah(withdrawal['amount'])}</b> ditolak oleh Admin. Saldo telah dikembalikan ke akun kamu.",
                 parse_mode="html",
             )
             return
 
+        # 3. Stop Bot
+        if data.startswith("adm_stop:"):
+            bot_code = data.split(":")[1]
+            if bot_manager:
+                await bot_manager.stop_bot(bot_code)
+                await event.edit(f"⏹️ Bot <b>{html.escape(bot_code)}</b> berhasil dihentikan.", parse_mode="html")
+                await send_log(client, config, db, f"<b>Bot Stopped</b>\nCode: <code>{html.escape(bot_code)}</code>\nAdmin: <code>{event.sender_id}</code>")
+            return
+
+        # 4. Start Bot
+        if data.startswith("adm_start:"):
+            bot_code = data.split(":")[1]
+            if bot_manager:
+                bot_data = await db.get_bot(bot_code)
+                if bot_data:
+                    await bot_manager.spawn_bot(bot_data)
+                    await event.edit(f"▶️ Bot <b>{html.escape(bot_code)}</b> berhasil diaktifkan kembali.", parse_mode="html")
+                    await send_log(client, config, db, f"<b>Bot Started</b>\nCode: <code>{html.escape(bot_code)}</code>\nAdmin: <code>{event.sender_id}</code>")
+            return
+
+        # 5. Delete Bot
+        if data.startswith("adm_delbot:"):
+            bot_code = data.split(":")[1]
+            if bot_manager:
+                await bot_manager.delete_bot(bot_code)
+                await event.edit(f"🗑️ Bot <b>{html.escape(bot_code)}</b> berhasil dihapus dari database.", parse_mode="html")
+                await send_log(client, config, db, f"<b>Bot Deleted</b>\nCode: <code>{html.escape(bot_code)}</code>\nAdmin: <code>{event.sender_id}</code>")
+            return
+
+        # 6. Delete Package
+        if data.startswith("adm_delpkg:"):
+            parts = data.split(":")
+            bot_code = parts[1]
+            pkg_code = parts[2]
+            await db.delete_package(pkg_code, bot_code=bot_code)
+            await event.edit(f"🗑️ Paket <code>{html.escape(pkg_code)}</code> ({html.escape(bot_code)}) berhasil dinonaktifkan.", parse_mode="html")
+            return
+
+        # 7. Select Bot for Add Package
+        if data.startswith("adm_addpkg_bot:"):
+            bot_code = data.split(":")[1]
+            admin_states[event.sender_id] = {
+                "action": "add_package",
+                "step": "code",
+                "data": {"bot_code": bot_code},
+            }
+            await event.edit(
+                f"📦 <b>Tambah Paket VIP [{html.escape(bot_code)}] (Langkah 1/4)</b>\n\n"
+                f"Ketik <b>kode paket</b> (huruf kecil & angka tanpa spasi).\n"
+                f"Contoh: <code>vip1</code>",
+                parse_mode="html",
+            )
+            await event.respond("Ketik kode paket atau klik Batal:", buttons=cancel_keyboard())
+            return
+
+        # 8. Select Bot for Set Broadcast Message
+        if data.startswith("adm_setbc_bot:"):
+            bot_code = data.split(":")[1]
+            admin_states[event.sender_id] = {
+                "action": "set_broadcast_msg",
+                "step": "message",
+                "data": {"bot_code": bot_code},
+            }
+            await event.edit(
+                f"📢 <b>Set Pesan Broadcast untuk [{html.escape(bot_code)}]</b>\n\n"
+                f"Silakan kirimkan pesan teks atau media yang ingin kamu jadikan konten broadcast.",
+                parse_mode="html",
+            )
+            await event.respond("Kirim pesan / media sekarang:", buttons=cancel_keyboard())
+            return
+
+        # 9. Select Bot for Set Broadcast Time
+        if data.startswith("adm_setbct_bot:"):
+            bot_code = data.split(":")[1]
+            admin_states[event.sender_id] = {
+                "action": "set_broadcast_time",
+                "step": "time",
+                "data": {"bot_code": bot_code},
+            }
+            quick_time_keyboard = [
+                [Button.text("09:00", resize=True), Button.text("12:00"), Button.text("15:00")],
+                [Button.text("19:00"), Button.text("21:00"), Button.text("off")],
+                [Button.text("❌ Batal")],
+            ]
+            await event.edit(
+                f"⏰ <b>Atur Jadwal Broadcast [{html.escape(bot_code)}]</b>\n\n"
+                f"Pilih jam cepat atau ketik jam pengiriman (format <code>HH:MM</code>, contoh <code>09:30</code> WIB).",
+                parse_mode="html",
+            )
+            await event.respond("Pilih jam pengiriman:", buttons=quick_time_keyboard)
+            return
+
+        # 10. Select Bot for Test Broadcast
+        if data.startswith("adm_testbc_bot:"):
+            bot_code = data.split(":")[1]
+            msg = await db.get_active_broadcast_message(bot_code=bot_code)
+            if not msg:
+                await event.answer("Belum ada pesan broadcast untuk bot ini.", alert=True)
+                return
+            target_client = bot_manager.get_client(bot_code) if bot_manager else client
+            admin_ids = list(config.admin_user_ids) or [event.sender_id]
+            totals = await send_broadcast_batch(target_client, db, msg, admin_ids, config.qris_create_concurrency, bot_code=bot_code)
+            await event.edit(
+                f"✅ <b>Test Broadcast Selesai [{html.escape(bot_code)}]</b>\n"
+                f"• Terkirim ke Admin: <code>{totals['sent']}/{len(admin_ids)}</code>\n"
+                f"• Error: <code>{totals['error']}</code>",
+                parse_mode="html",
+            )
+            return
+
+        # 11. Config Updates
+        if data.startswith("adm_cfg:"):
+            key = data.split(":")[1]
+            admin_states[event.sender_id] = {
+                "action": "set_config",
+                "step": "value",
+                "data": {"key": key},
+            }
+            await event.edit(f"Ketik ID Telegram baru untuk <code>{key}</code>:", parse_mode="html")
+            await event.respond("Masukkan ID baru:", buttons=cancel_keyboard())
+            return
+
+    # -------------------------------------------------------------------------
+    # Backward Compatibility Slash Commands (/bot_add, /package_add, etc.)
+    # -------------------------------------------------------------------------
+    @client.on(events.NewMessage(pattern=r"^/bot_add(?:@\w+)?(?:\s+(.+))?$"))
+    async def legacy_bot_add(event):
+        if not await require_admin(event, config, db):
+            return
+        if not bot_manager:
+            await event.respond("Bot Manager tidak aktif.")
+            return
+        raw = (event.pattern_match.group(1) or "").strip()
+        parts = raw.split()
+        if len(parts) < 2:
+            await event.respond("Format: `/bot_add <nama_bot> <bot_token>`")
+            return
+        bot_code, bot_token = parts[0].lower(), parts[1]
         try:
-            time_value = validate_broadcast_time(raw_time)
-        except ValueError:
-            await event.respond("Format jam salah. Gunakan `HH:MM` (contoh `09:30`) atau `off`.")
-            return
+            res = await bot_manager.spawn_bot({"bot_code": bot_code, "bot_token": bot_token, "bot_name": bot_code})
+            await send_log(
+                client, config, db,
+                f"🤖 <b>Bot Payment Baru Aktif!</b>\n• Nama: <b>{bot_code}</b>\n• Status: 🟢 Online"
+            )
+            await event.respond(f"✅ Bot <b>{bot_code}</b> berhasil diaktifkan!", parse_mode="html", buttons=admin_main_menu_keyboard())
+        except Exception as exc:
+            await event.respond(f"❌ Gagal: {exc}")
 
-        await db.set_broadcast_time(time_value, bot_code=bot_code)
-        await db.set_last_broadcast_date("", bot_code=bot_code)
-        if not time_value:
-            await event.respond(f"✅ Broadcast otomatis untuk bot <b>{html.escape(bot_code)}</b> dinonaktifkan.", parse_mode="html")
+    @client.on(events.NewMessage(pattern=r"^/package_add(?:@\w+)?(?:\s+(.+))?$"))
+    async def legacy_package_add(event):
+        if not await require_admin(event, config, db):
             return
-        await event.respond(
-            f"✅ Broadcast otomatis untuk bot <b>{html.escape(bot_code)}</b> dijadwalkan setiap <b>{html.escape(time_value)} WIB</b>.",
-            parse_mode="html",
-        )
+        raw = (event.pattern_match.group(1) or "").strip()
+        try:
+            bot_code, code, name, chat_id, amount = parse_package_add_args(raw)
+            await db.upsert_package(code, name, chat_id, amount, bot_code=bot_code)
+            await event.respond(f"✅ Paket <code>{code}</code> ({bot_code}) berhasil disimpan!", parse_mode="html", buttons=admin_main_menu_keyboard())
+        except Exception as exc:
+            await event.respond(f"❌ Format salah: {exc}")
 
-    @client.on(events.NewMessage(pattern=r"^/test_broadcast(?:@\w+)?(?:\s+(\S+))?$"))
-    async def test_broadcast(event):
-        if not await require_admin_logchat(event, config, db):
+    @client.on(events.NewMessage(pattern=r"^/tarik_list(?:@\w+)?$"))
+    async def legacy_tarik_list(event):
+        if not await require_admin(event, config, db):
             return
-        bot_code = (event.pattern_match.group(1) or "default").strip()
-        broadcast_message = await db.get_active_broadcast_message(bot_code=bot_code)
-        if not broadcast_message:
+        pending = await db.list_pending_withdrawals()
+        if not pending:
+            await event.respond("✅ Tidak ada antrean penarikan pending.")
+            return
+        for w in pending:
             await event.respond(
-                f"Belum ada broadcast yang disimpan untuk bot <b>{html.escape(bot_code)}</b>.\n"
-                f"Balas (reply) ke pesan lalu ketik <code>/set_broadcast {html.escape(bot_code)}</code> terlebih dahulu.",
+                f"💳 <b>Penarikan #{w['id']}</b> ({w['bot_code']}) - <b>{format_rupiah(w['amount'])}</b>\n"
+                f"User: <code>{w['user_id']}</code> | No HP: <code>{w['phone']}</code>",
                 parse_mode="html",
+                buttons=[[Button.inline("Approve", f"adm_appr:{w['id']}"), Button.inline("Reject", f"adm_rejc:{w['id']}")]]
             )
-            return
-        admin_ids = sorted(config.admin_user_ids)
-        if not admin_ids:
-            admin_ids = [event.sender_id]
-        
-        target_client = bot_manager.get_client(bot_code) if (bot_manager and hasattr(bot_manager, "get_client")) else client
-        totals = await send_broadcast_batch(target_client, db, broadcast_message, admin_ids, config.qris_create_concurrency, bot_code=bot_code)
-        await event.respond(
-            f"✅ <b>Test Broadcast Selesai [{html.escape(bot_code)}]</b>\n"
-            f"• Terkirim ke Admin: <code>{totals['sent']}/{len(admin_ids)}</code>\n"
-            f"• Blocked: <code>{totals['blocked']}</code>\n"
-            f"• Deactivated: <code>{totals['deactivated']}</code>\n"
-            f"• Error: <code>{totals['error']}</code>",
-            parse_mode="html",
-        )
-
-    @client.on(events.NewMessage(pattern=r"^/broadcast_(?:status|info|list)(?:@\w+)?(?:\s+(\S+))?$"))
-    async def broadcast_status_cmd(event):
-        if not await require_admin_logchat(event, config, db):
-            return
-        requested_bot = (event.pattern_match.group(1) or "").strip()
-        if requested_bot:
-            bots_to_show = [requested_bot]
-        else:
-            bots_to_show = ["default"]
-            try:
-                active = await db.list_all_bots()
-                for b in active:
-                    if b["bot_code"] not in bots_to_show:
-                        bots_to_show.append(b["bot_code"])
-            except Exception:
-                pass
-
-        lines = ["📢 <b>Status Konfigurasi Broadcast Multi-Bot:</b>\n"]
-        for b_code in bots_to_show:
-            b_time = await db.get_broadcast_time(bot_code=b_code) or "OFF"
-            last_date = await db.get_last_broadcast_date(bot_code=b_code) or "-"
-            msg = await db.get_active_broadcast_message(bot_code=b_code)
-            user_count = await db.count_broadcast_targets(bot_code=b_code)
-            
-            if msg:
-                msg_status = "✅ Ada"
-                if msg.get("media_type"):
-                    msg_status += f" ({msg['media_type']})"
-            else:
-                msg_status = "❌ Belum diset"
-
-            lines.append(
-                f"🤖 <b>{html.escape(b_code)}</b>:\n"
-                f"• Jadwal: <b>{html.escape(b_time)} WIB</b>\n"
-                f"• Pesan: {msg_status}\n"
-                f"• Terakhir Kirim: <code>{html.escape(last_date)}</code>\n"
-                f"• Total User: <b>{user_count} orang</b>\n"
-            )
-        await event.respond("\n".join(lines), parse_mode="html")
