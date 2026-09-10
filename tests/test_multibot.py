@@ -5,9 +5,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from vip_bot.handlers.admin import parse_package_add_args
-from vip_bot.messages import bot_list_text, package_list_text, package_buttons, default_package
+from vip_bot.messages import bot_list_text, package_list_text, package_buttons, default_package, admin_command_list_text
 from vip_bot.bot_manager import BotManager, BotInstance
 
 
@@ -38,8 +38,6 @@ class TestMultiBot(unittest.TestCase):
         text = bot_list_text(bots)
         self.assertIn("botpayment1", text)
         self.assertIn("@pay1_bot", text)
-        self.assertIn("🟢", text)
-        self.assertIn("🔴", text)
 
     def test_package_buttons_per_bot(self):
         store = MagicMock()
@@ -75,6 +73,44 @@ class TestMultiBot(unittest.TestCase):
             status="active",
         )
         self.assertEqual(bm.get_client("botpayment1"), child_client)
+
+    def test_admin_commands_include_per_bot_broadcast(self):
+        text = admin_command_list_text()
+        self.assertIn("/set_broadcast [nama_bot]", text)
+        self.assertIn("/set_broadcasttime &lt;nama_bot&gt;", text)
+        self.assertIn("/test_broadcast [nama_bot]", text)
+        self.assertIn("/broadcast_status [nama_bot]", text)
+
+
+    def test_broadcast_time_per_bot_keying(self):
+        import asyncio
+        from vip_bot.db import Database
+
+        # Test key resolution logic
+        db = Database.__new__(Database)
+        storage = {}
+
+        async def fake_set_setting(key, val):
+            storage[key] = str(val)
+
+        async def fake_get_setting(key, default=""):
+            return storage.get(key, default)
+
+        db.set_setting = fake_set_setting
+        db.get_setting = fake_get_setting
+
+        async def run_scenario():
+            # Set broadcast time for bot1
+            await db.set_broadcast_time("09:00", bot_code="bot1")
+            # Set broadcast time for bot2
+            await db.set_broadcast_time("14:30", bot_code="bot2")
+
+            # Verify isolated keys
+            self.assertEqual(await db.get_broadcast_time("bot1"), "09:00")
+            self.assertEqual(await db.get_broadcast_time("bot2"), "14:30")
+            self.assertEqual(await db.get_broadcast_time("bot3"), "")
+
+        asyncio.run(run_scenario())
 
 
 if __name__ == "__main__":

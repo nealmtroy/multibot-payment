@@ -331,7 +331,7 @@ async def polling_loop(bot_manager_or_client, config, db):
         await asyncio.sleep(config.poll_interval_seconds)
 
 
-async def send_broadcast_batch(client, db, broadcast_message, target_ids, concurrency=5):
+async def send_broadcast_batch(client, db, broadcast_message, target_ids, concurrency=5, bot_code="default"):
     semaphore = asyncio.Semaphore(concurrency)
     totals = {"sent": 0, "blocked": 0, "deactivated": 0, "error": 0}
 
@@ -342,32 +342,73 @@ async def send_broadcast_batch(client, db, broadcast_message, target_ids, concur
                 totals[status] += 1
             else:
                 totals["error"] += 1
+            if status == "sent":
+                try:
+                    await db.mark_user_broadcasted(uid, bot_code=bot_code)
+                except Exception:
+                    pass
 
     await asyncio.gather(*[_send(uid) for uid in target_ids])
     return totals
 
 
 async def broadcast_loop(bot_manager_or_client, config, db):
-    LOGGER.info("Starting Broadcast loop (Native Postgres)...")
+    LOGGER.info("Starting Multi-Bot Broadcast loop (Native Postgres)...")
     while True:
         try:
-            broadcast_time = await db.get_broadcast_time()
-            if broadcast_time and broadcast_time not in BROADCAST_DISABLED_VALUES:
-                now_wib = dt.datetime.now(WIB)
-                today_str = now_wib.strftime("%Y-%m-%d")
-                current_time = now_wib.strftime("%H:%M")
-                last_date = await db.get_last_broadcast_date()
+            now_wib = dt.datetime.now(WIB)
+            today_str = now_wib.strftime("%Y-%m-%d")
+            current_time = now_wib.strftime("%H:%M")
 
-                if current_time == broadcast_time and last_date != today_str:
-                    msg = await db.get_active_broadcast_message()
-                    if msg:
-                        client = resolve_client(bot_manager_or_client, "default")
-                        targets = [t["user_id"] for t in (await db.get_broadcast_targets(limit=1000))]
+            # Collect all bots to evaluate
+            known_bot_codes = {"default"}
+            if hasattr(bot_manager_or_client, "active_bots"):
+                known_bot_codes.update(bot_manager_or_client.active_bots.keys())
+            try:
+                db_bots = await db.list_active_bots()
+                for b in db_bots:
+                    known_bot_codes.add(b["bot_code"])
+            except Exception:
+                pass
+
+            for b_code in sorted(known_bot_codes):
+                try:
+                    b_time = await db.get_broadcast_time(bot_code=b_code)
+                    if not b_time or b_time in BROADCAST_DISABLED_VALUES:
+                        continue
+                    last_date = await db.get_last_broadcast_date(bot_code=b_code)
+                    if current_time == b_time and last_date != today_str:
+                        msg = await db.get_active_broadcast_message(bot_code=b_code)
+                        if not msg:
+                            LOGGER.info("Broadcast time reached for [%s] (%s WIB) but no active message", b_code, b_time)
+                            continue
+
+                        client = resolve_client(bot_manager_or_client, b_code)
+                        targets = [t["user_id"] for t in (await db.get_broadcast_targets(bot_code=b_code, limit=1000))]
                         if targets:
-                            await send_broadcast_batch(client, db, msg, targets, config.qris_create_concurrency)
-                    await db.set_last_broadcast_date(today_str)
+                            LOGGER.info("Dispatching broadcast for bot [%s] to %d users...", b_code, len(targets))
+                            totals = await send_broadcast_batch(
+                                client, db, msg, targets, config.qris_create_concurrency, bot_code=b_code
+                            )
+                            LOGGER.info("Broadcast for bot [%s] completed: %s", b_code, totals)
+                            await send_log(
+                                client,
+                                config,
+                                db,
+                                (
+                                    f"📢 <b>Broadcast Harian Selesai [{html.escape(b_code)}]</b>\n"
+                                    f"• Waktu: <code>{html.escape(b_time)} WIB</code>\n"
+                                    f"• Terkirim: <b>{totals.get('sent', 0)}</b>\n"
+                                    f"• Diblokir: <b>{totals.get('blocked', 0)}</b>\n"
+                                    f"• Akun Dihapus: <b>{totals.get('deactivated', 0)}</b>\n"
+                                    f"• Gagal: <b>{totals.get('error', 0)}</b>"
+                                ),
+                            )
+                        await db.set_last_broadcast_date(today_str, bot_code=b_code)
+                except Exception as sub_exc:
+                    LOGGER.exception("Error processing broadcast for bot [%s]: %s", b_code, sub_exc)
         except asyncio.CancelledError:
             break
         except Exception as exc:
             LOGGER.exception("Error in broadcast loop: %s", exc)
-        await asyncio.sleep(30)
+        await asyncio.sleep(20)

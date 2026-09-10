@@ -526,21 +526,38 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute(query, key, str(value))
 
-    async def get_active_broadcast_message(self) -> dict | None:
+    async def get_active_broadcast_message(self, bot_code: str = "default") -> dict | None:
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM broadcast_messages WHERE is_active = true ORDER BY id DESC LIMIT 1")
+            row = await conn.fetchrow(
+                "SELECT * FROM broadcast_messages WHERE bot_code = $1 AND is_active = true ORDER BY id DESC LIMIT 1",
+                bot_code or "default",
+            )
             return record_to_dict(row)
 
-    async def set_broadcast_message(self, message_text: str, media_file_id: str, media_type: str, entities_json: str) -> dict:
+    async def set_broadcast_message(
+        self,
+        message_text: str,
+        media_file_id: str,
+        media_type: str,
+        entities_json: str,
+        bot_code: str = "default",
+    ) -> dict:
+        code = bot_code or "default"
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute("UPDATE broadcast_messages SET is_active = false, updated_at = now()")
+                await conn.execute(
+                    "UPDATE broadcast_messages SET is_active = false, updated_at = now() WHERE bot_code = $1 AND is_active = true",
+                    code,
+                )
                 row = await conn.fetchrow(
                     """
-                    INSERT INTO broadcast_messages (message_text, media_telegram_file_id, media_type, entities_json, is_active, created_at, updated_at)
-                    VALUES ($1, $2, $3, $4, true, now(), now())
+                    INSERT INTO broadcast_messages (
+                        bot_code, message_text, media_telegram_file_id, media_type, entities_json, is_active, created_at, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, true, now(), now())
                     RETURNING *;
                     """,
+                    code,
                     message_text or "",
                     media_file_id or "",
                     media_type or "",
@@ -548,54 +565,76 @@ class Database:
                 )
                 return record_to_dict(row)
 
-    async def get_broadcast_targets(self, before_iso: str = None, limit: int = 1000, bot_code: str = None) -> list[dict]:
+    async def get_broadcast_targets(
+        self, bot_code: str = "default", before_iso: str = None, limit: int = 1000
+    ) -> list[dict]:
         from vip_bot.helpers import parse_iso_datetime
+        code = bot_code or "default"
         before_dt = parse_iso_datetime(before_iso) if before_iso else None
         async with self.pool.acquire() as conn:
-            if bot_code and before_dt:
+            if before_dt:
                 rows = await conn.fetch(
-                    "SELECT user_id FROM users WHERE bot_code = $1 AND is_bot = false AND (last_broadcast_at IS NULL OR last_broadcast_at < $2) ORDER BY last_broadcast_at ASC NULLS FIRST LIMIT $3",
-                    bot_code,
-                    before_dt,
-                    limit,
-                )
-            elif bot_code:
-                rows = await conn.fetch(
-                    "SELECT user_id FROM users WHERE bot_code = $1 AND is_bot = false ORDER BY last_broadcast_at ASC NULLS FIRST LIMIT $2",
-                    bot_code,
-                    limit,
-                )
-            elif before_dt:
-                rows = await conn.fetch(
-                    "SELECT user_id FROM users WHERE is_bot = false AND (last_broadcast_at IS NULL OR last_broadcast_at < $1) ORDER BY last_broadcast_at ASC NULLS FIRST LIMIT $2",
+                    """
+                    SELECT user_id FROM users
+                    WHERE bot_code = $1 AND is_bot = false AND (last_broadcast_at IS NULL OR last_broadcast_at < $2)
+                    ORDER BY last_broadcast_at ASC NULLS FIRST LIMIT $3
+                    """,
+                    code,
                     before_dt,
                     limit,
                 )
             else:
                 rows = await conn.fetch(
-                    "SELECT user_id FROM users WHERE is_bot = false ORDER BY last_broadcast_at ASC NULLS FIRST LIMIT $1",
+                    """
+                    SELECT user_id FROM users
+                    WHERE bot_code = $1 AND is_bot = false
+                    ORDER BY last_broadcast_at ASC NULLS FIRST LIMIT $2
+                    """,
+                    code,
                     limit,
                 )
             return records_to_dicts(rows)
 
     async def mark_user_broadcasted(self, user_id: int, bot_code: str = "default"):
+        code = bot_code or "default"
         async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE users SET last_broadcast_at = now(), updated_at = now() WHERE bot_code = $1 AND user_id = $2", bot_code, int(user_id))
+            await conn.execute(
+                "UPDATE users SET last_broadcast_at = now(), updated_at = now() WHERE bot_code = $1 AND user_id = $2",
+                code,
+                int(user_id),
+            )
 
-    async def count_broadcast_targets(self, bot_code: str = None) -> int:
+    async def count_broadcast_targets(self, bot_code: str = "default") -> int:
+        code = bot_code or "default"
         async with self.pool.acquire() as conn:
-            if bot_code:
-                return await conn.fetchval("SELECT count(*) FROM users WHERE bot_code = $1 AND is_bot = false", bot_code) or 0
-            return await conn.fetchval("SELECT count(*) FROM users WHERE is_bot = false") or 0
+            return await conn.fetchval("SELECT count(*) FROM users WHERE bot_code = $1 AND is_bot = false", code) or 0
 
-    async def set_broadcast_time(self, time_str: str):
-        await self.set_setting("broadcast_time", time_str or "")
+    async def set_broadcast_time(self, time_str: str, bot_code: str = "default"):
+        code = bot_code or "default"
+        key = f"broadcast_time:{code}"
+        await self.set_setting(key, time_str or "")
+        if code == "default":
+            await self.set_setting("broadcast_time", time_str or "")
 
-    async def get_broadcast_time(self) -> str:
-        return await self.get_setting("broadcast_time", "")
+    async def get_broadcast_time(self, bot_code: str = "default") -> str:
+        code = bot_code or "default"
+        key = f"broadcast_time:{code}"
+        val = await self.get_setting(key, "")
+        if not val and code == "default":
+            val = await self.get_setting("broadcast_time", "")
+        return val or ""
 
-    async def set_last_broadcast_date(self, date_str: str):
-        await self.set_setting("last_broadcast_date", date_str or "")
+    async def set_last_broadcast_date(self, date_str: str, bot_code: str = "default"):
+        code = bot_code or "default"
+        key = f"last_broadcast_date:{code}"
+        await self.set_setting(key, date_str or "")
+        if code == "default":
+            await self.set_setting("last_broadcast_date", date_str or "")
 
-    async def get_last_broadcast_date(self) -> str:
-        return await self.get_setting("last_broadcast_date", "")
+    async def get_last_broadcast_date(self, bot_code: str = "default") -> str:
+        code = bot_code or "default"
+        key = f"last_broadcast_date:{code}"
+        val = await self.get_setting(key, "")
+        if not val and code == "default":
+            val = await self.get_setting("last_broadcast_date", "")
+        return val or ""

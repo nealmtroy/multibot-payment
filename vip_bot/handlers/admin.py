@@ -421,13 +421,18 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
             return
         await event.respond(admin_command_list_text(), parse_mode="html")
 
-    @client.on(events.NewMessage(pattern=r"^/set_broadcast(?:@\w+)?$"))
+    @client.on(events.NewMessage(pattern=r"^/set_broadcast(?:@\w+)?(?:\s+(\S+))?$"))
     async def set_broadcast(event):
         if not await require_admin_logchat(event, config, db):
             return
+        bot_code = (event.pattern_match.group(1) or "default").strip()
         replied = await event.get_reply_message()
         if not replied:
-            await event.respond("Reply ke pesan yang mau dijadikan broadcast.")
+            await event.respond(
+                f"Balas (reply) ke pesan yang mau dijadikan broadcast untuk bot <b>{html.escape(bot_code)}</b>.\n"
+                f"Contoh: reply pesan lalu kirim <code>/set_broadcast {html.escape(bot_code)}</code>",
+                parse_mode="html",
+            )
             return
         text = replied.raw_text or ""
         media_file_id = getattr(getattr(replied, "file", None), "id", "") or ""
@@ -435,45 +440,129 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
         if not text and not media_file_id:
             await event.respond("Pesan harus memiliki teks atau media.")
             return
-        saved = await db.set_broadcast_message(text, media_file_id, media_type, entities_to_json(replied.entities or []))
-        await event.respond("Broadcast berhasil disimpan. Gunakan /test_broadcast untuk uji coba.")
+        saved = await db.set_broadcast_message(
+            text, media_file_id, media_type, entities_to_json(replied.entities or []), bot_code=bot_code
+        )
+        await event.respond(
+            f"✅ <b>Pesan broadcast untuk bot <code>{html.escape(bot_code)}</code> berhasil disimpan!</b>\n\n"
+            f"• Uji coba: <code>/test_broadcast {html.escape(bot_code)}</code>\n"
+            f"• Atur jadwal harian: <code>/set_broadcasttime {html.escape(bot_code)} 09:00</code>",
+            parse_mode="html",
+        )
 
     @client.on(events.NewMessage(pattern=r"^/set_broadcasttime(?:@\w+)?(?:\s+(.+))?$"))
     async def set_broadcast_time(event):
         if not await require_admin_logchat(event, config, db):
             return
-        raw_value = event.pattern_match.group(1) or ""
+        raw_value = (event.pattern_match.group(1) or "").strip()
         from vip_bot.helpers import validate_broadcast_time
-        try:
-            time_value = validate_broadcast_time(raw_value)
-        except ValueError:
-            await event.respond("Format: `/set_broadcasttime HH:MM` contoh `/set_broadcasttime 09:00`, atau `/set_broadcasttime off`.")
+        parts = raw_value.split()
+        
+        if len(parts) == 1:
+            val = parts[0].lower()
+            if val in BROADCAST_DISABLED_VALUES or BROADCAST_TIME_PATTERN.fullmatch(val):
+                bot_code = "default"
+                raw_time = val
+            else:
+                await event.respond(
+                    "Format:\n"
+                    "• <code>/set_broadcasttime &lt;bot_code&gt; HH:MM</code> (contoh: <code>/set_broadcasttime botpayment1 09:00</code>)\n"
+                    "• <code>/set_broadcasttime &lt;bot_code&gt; off</code>",
+                    parse_mode="html",
+                )
+                return
+        elif len(parts) >= 2:
+            bot_code = parts[0]
+            raw_time = parts[1]
+        else:
+            await event.respond(
+                "Format:\n"
+                "• <code>/set_broadcasttime &lt;bot_code&gt; HH:MM</code> (contoh: <code>/set_broadcasttime botpayment1 09:00</code>)\n"
+                "• <code>/set_broadcasttime &lt;bot_code&gt; off</code>",
+                parse_mode="html",
+            )
             return
-        await db.set_broadcast_time(time_value)
-        await db.set_last_broadcast_date("")
-        if not time_value:
-            await event.respond("Broadcast otomatis dinonaktifkan.")
-            return
-        await event.respond(f"Broadcast otomatis dijadwalkan setiap <b>{html.escape(time_value)} WIB</b>.", parse_mode="html")
 
-    @client.on(events.NewMessage(pattern=r"^/test_broadcast(?:@\w+)?$"))
+        try:
+            time_value = validate_broadcast_time(raw_time)
+        except ValueError:
+            await event.respond("Format jam salah. Gunakan `HH:MM` (contoh `09:30`) atau `off`.")
+            return
+
+        await db.set_broadcast_time(time_value, bot_code=bot_code)
+        await db.set_last_broadcast_date("", bot_code=bot_code)
+        if not time_value:
+            await event.respond(f"✅ Broadcast otomatis untuk bot <b>{html.escape(bot_code)}</b> dinonaktifkan.", parse_mode="html")
+            return
+        await event.respond(
+            f"✅ Broadcast otomatis untuk bot <b>{html.escape(bot_code)}</b> dijadwalkan setiap <b>{html.escape(time_value)} WIB</b>.",
+            parse_mode="html",
+        )
+
+    @client.on(events.NewMessage(pattern=r"^/test_broadcast(?:@\w+)?(?:\s+(\S+))?$"))
     async def test_broadcast(event):
         if not await require_admin_logchat(event, config, db):
             return
-        broadcast_message = await db.get_active_broadcast_message()
+        bot_code = (event.pattern_match.group(1) or "default").strip()
+        broadcast_message = await db.get_active_broadcast_message(bot_code=bot_code)
         if not broadcast_message:
-            await event.respond("Belum ada broadcast yang disimpan. Gunakan /set_broadcast dulu.")
+            await event.respond(
+                f"Belum ada broadcast yang disimpan untuk bot <b>{html.escape(bot_code)}</b>.\n"
+                f"Balas (reply) ke pesan lalu ketik <code>/set_broadcast {html.escape(bot_code)}</code> terlebih dahulu.",
+                parse_mode="html",
+            )
             return
         admin_ids = sorted(config.admin_user_ids)
         if not admin_ids:
-            await event.respond("ADMIN_USER_IDS belum diisi.")
-            return
-        totals = await send_broadcast_batch(client, db, broadcast_message, admin_ids, config.qris_create_concurrency)
+            admin_ids = [event.sender_id]
+        
+        target_client = bot_manager.get_client(bot_code) if (bot_manager and hasattr(bot_manager, "get_client")) else client
+        totals = await send_broadcast_batch(target_client, db, broadcast_message, admin_ids, config.qris_create_concurrency, bot_code=bot_code)
         await event.respond(
-            "Test broadcast selesai.\n"
-            f"Terkirim: <code>{totals['sent']}</code>\n"
-            f"Blocked: <code>{totals['blocked']}</code>\n"
-            f"Deactivated: <code>{totals['deactivated']}</code>\n"
-            f"Error: <code>{totals['error']}</code>",
+            f"✅ <b>Test Broadcast Selesai [{html.escape(bot_code)}]</b>\n"
+            f"• Terkirim ke Admin: <code>{totals['sent']}/{len(admin_ids)}</code>\n"
+            f"• Blocked: <code>{totals['blocked']}</code>\n"
+            f"• Deactivated: <code>{totals['deactivated']}</code>\n"
+            f"• Error: <code>{totals['error']}</code>",
             parse_mode="html",
         )
+
+    @client.on(events.NewMessage(pattern=r"^/broadcast_(?:status|info|list)(?:@\w+)?(?:\s+(\S+))?$"))
+    async def broadcast_status_cmd(event):
+        if not await require_admin_logchat(event, config, db):
+            return
+        requested_bot = (event.pattern_match.group(1) or "").strip()
+        if requested_bot:
+            bots_to_show = [requested_bot]
+        else:
+            bots_to_show = ["default"]
+            try:
+                active = await db.list_all_bots()
+                for b in active:
+                    if b["bot_code"] not in bots_to_show:
+                        bots_to_show.append(b["bot_code"])
+            except Exception:
+                pass
+
+        lines = ["📢 <b>Status Konfigurasi Broadcast Multi-Bot:</b>\n"]
+        for b_code in bots_to_show:
+            b_time = await db.get_broadcast_time(bot_code=b_code) or "OFF"
+            last_date = await db.get_last_broadcast_date(bot_code=b_code) or "-"
+            msg = await db.get_active_broadcast_message(bot_code=b_code)
+            user_count = await db.count_broadcast_targets(bot_code=b_code)
+            
+            if msg:
+                msg_status = "✅ Ada"
+                if msg.get("media_type"):
+                    msg_status += f" ({msg['media_type']})"
+            else:
+                msg_status = "❌ Belum diset"
+
+            lines.append(
+                f"🤖 <b>{html.escape(b_code)}</b>:\n"
+                f"• Jadwal: <b>{html.escape(b_time)} WIB</b>\n"
+                f"• Pesan: {msg_status}\n"
+                f"• Terakhir Kirim: <code>{html.escape(last_date)}</code>\n"
+                f"• Total User: <b>{user_count} orang</b>\n"
+            )
+        await event.respond("\n".join(lines), parse_mode="html")

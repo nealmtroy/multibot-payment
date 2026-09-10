@@ -201,7 +201,9 @@ def admin_command_list_text():
         "• <code>/setvip &lt;chat_id|here&gt;</code> - Set VIP chat default\n"
         "• <code>/setlog &lt;chat_id|here&gt;</code> - Set channel log admin\n"
         "• <code>/config</code> - Lihat konfigurasi global\n"
-        "• <code>/set_broadcast</code> - Simpan pesan broadcast (reply ke pesan)\n"
-        "• <code>/set_broadcasttime &lt;HH:MM|off&gt;</code> - Jadwalkan broadcast harian\n"
-        "• <code>/test_broadcast</code> - Uji broadcast ke admin"
+        "\n📢 <b>Command Broadcast (Per Bot):</b>\n"
+        "• <code>/set_broadcast [nama_bot]</code> - Simpan pesan broadcast (reply ke pesan)\n"
+        "• <code>/set_broadcasttime &lt;nama_bot&gt; &lt;HH:MM|off&gt;</code> - Jadwalkan broadcast harian per bot\n"
+        "• <code>/test_broadcast [nama_bot]</code> - Uji broadcast per bot ke admin\n"
+        "• <code>/broadcast_status [nama_bot]</code> - Cek status & jadwal broadcast tiap bot\n"
     )

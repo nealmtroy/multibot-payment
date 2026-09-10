@@ -152,3 +152,5 @@ CREATE TABLE IF NOT EXISTS broadcast_messages (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS idx_broadcast_bot ON broadcast_messages (bot_code, is_active, id DESC);
