@@ -156,13 +156,14 @@ Format: `/package_add <bot_code> <kode> <Nama Group>|<vip_chat_id>|<harga>`
 | `/approve <id>` | Setujui penarikan & kirim notifikasi sukses ke user |
 | `/reject <id>` | Tolak penarikan, saldo user otomatis dikembalikan |
 
-### 4. Broadcast
+### 4. Broadcast (Terisolasi 100% Per Bot)
 | Perintah | Deskripsi |
 |---|---|
-| `/set_broadcast [text/media]` | Set konten pesan broadcast |
-| `/set_broadcasttime HH:MM` | Jadwalkan waktu broadcast harian (WIB) |
-| `/set_broadcasttime off` | Nonaktifkan broadcast otomatis |
-| `/test_broadcast` | Kirim uji coba broadcast ke grup log |
+| `/set_broadcast <nama_bot>` | Set pesan broadcast khusus bot (reply ke teks/media) |
+| `/set_broadcasttime <nama_bot> HH:MM` | Jadwalkan waktu broadcast harian per bot (WIB) |
+| `/set_broadcasttime <nama_bot> off` | Nonaktifkan broadcast otomatis untuk bot tersebut |
+| `/test_broadcast <nama_bot>` | Uji coba kirim broadcast bot tersebut ke admin |
+| `/broadcast_status [nama_bot]` | Cek status, jadwal, & target user broadcast tiap bot |
 
 ---
 
