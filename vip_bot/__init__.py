@@ -73,7 +73,7 @@ async def start_bot():
         startup_msg = (
             "🚀 <b>MultiBot Payment has been started!</b>\n\n"
             "<i>Tidak ada bot yang aktif saat ini.</i>\n\n"
-            f"Gunakan <code>/bot_add &lt;nama_bot&gt; &lt;bot_token&gt;</code> di Private Chat @{master_client.bot_username} untuk menambahkan bot baru."
+            f"Gunakan menu <b>➕ Tambah Bot Baru</b> di Private Chat @{master_client.bot_username} untuk menambahkan bot baru."
         )
 
     await send_log(master_client, config, db, startup_msg)

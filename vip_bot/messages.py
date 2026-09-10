@@ -170,7 +170,7 @@ def package_list_text(packages, bot_code=None):
 
 def bot_list_text(bots):
     if not bots:
-        return "🤖 <b>Daftar Bot Payment:</b>\n<i>Belum ada bot yang didaftarkan. Gunakan /bot_add</i>"
+        return "🤖 <b>Daftar Bot Payment:</b>\n<i>Belum ada bot yang didaftarkan. Gunakan menu ➕ Tambah Bot Baru</i>"
     lines = ["🤖 <b>Daftar Bot Payment Aktif:</b>\n"]
     for idx, b in enumerate(bots, 1):
         status_icon = "🟢" if b["status"] == "online" else "🔴"
@@ -195,7 +195,7 @@ def admin_command_list_text():
         "• <code>/package_list [nama_bot]</code> - List group VIP per bot\n"
         "• <code>/package_delete &lt;nama_bot&gt; &lt;kode&gt;</code> - Nonaktifkan group\n\n"
         "⚙️ <b>Command Setting & Utilitas:</b>\n"
-        "• <code>/commands</code> - Lihat daftar semua command\n"
+        "• <code>/menu</code> (atau <code>/commands</code>) - Buka menu dashboard interaktif\n"
         "• <code>/custom &lt;nominal&gt;</code> - Buat QRIS manual khusus admin\n"
         "• <code>/chatid</code> - Cek ID chat grup ini\n"
         "• <code>/setvip &lt;chat_id|here&gt;</code> - Set VIP chat default\n"

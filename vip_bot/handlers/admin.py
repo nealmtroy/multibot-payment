@@ -113,7 +113,7 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
     # -------------------------------------------------------------------------
     # /start or /menu: Welcome & ReplyKeyboardMarkup
     # -------------------------------------------------------------------------
-    @client.on(events.NewMessage(pattern=r"^/(?:start|menu)(?:@\w+)?(?:\s+.*)?$"))
+    @client.on(events.NewMessage(pattern=r"^/(?:start|menu|commands?|help)(?:@\w+)?(?:\s+.*)?$"))
     async def admin_start_handler(event):
         if not is_admin(config, event.sender_id):
             if event.is_private:
