@@ -140,8 +140,7 @@ class Database:
 
     async def upsert_user(self, user, bot_code: str = "default") -> dict:
         from vip_bot.helpers import format_referral_code, display_name
-        existing = await self.get_user(user.id, bot_code=bot_code)
-        code = existing.get("referral_code") if existing else format_referral_code(user.id)
+        code = format_referral_code(user.id, bot_code=bot_code)
         name = display_name(user)
         username = user.username or ""
         is_bot = bool(getattr(user, "bot", False))
@@ -152,6 +151,7 @@ class Database:
         ON CONFLICT (bot_code, user_id) DO UPDATE SET
             username = EXCLUDED.username,
             full_name = EXCLUDED.full_name,
+            referral_code = EXCLUDED.referral_code,
             is_bot = EXCLUDED.is_bot,
             updated_at = now()
         RETURNING *;
@@ -226,7 +226,7 @@ class Database:
             "pending_count": int(user.get("pending_referrals") or 0),
             "successful_count": int(user.get("successful_referrals") or 0),
             "balance": int(user.get("balance") or 0),
-            "referral_code": user.get("referral_code") or format_referral_code(user_id),
+            "referral_code": user.get("referral_code") or format_referral_code(user_id, bot_code=bot_code),
             "invited_by_user_id": user.get("invited_by_user_id"),
             "phone": user.get("phone") or "",
         }

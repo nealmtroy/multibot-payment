@@ -1,3 +1,4 @@
+import hashlib
 import asyncio
 import datetime as dt
 import html
@@ -157,14 +158,13 @@ def public_invoice_id():
     return f"VIP-{date_part}-{suffix}"
 
 
-def format_referral_code(user_id):
+def format_referral_code(user_id, bot_code: str = "default") -> str:
     alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    value = (int(user_id) * 2654435761) & 0xFFFFFFFF
-    chars = []
-    for _ in range(6):
-        chars.append(alphabet[value % len(alphabet)])
-        value //= len(alphabet)
-    return "".join(chars).rstrip("A") or "A2345"
+    key = f"{bot_code or 'default'}:{int(user_id)}".encode("utf-8")
+    digest = hashlib.sha256(key).digest()
+    val = int.from_bytes(digest[:8], byteorder="big")
+    chars = [alphabet[(val // (len(alphabet) ** i)) % len(alphabet)] for i in range(6)]
+    return "".join(chars)
 
 
 def parse_referral_payload(payload):
@@ -172,7 +172,7 @@ def parse_referral_payload(payload):
     if raw.lower().startswith("ref_"):
         raw = raw[4:]
     raw = raw.upper()
-    if 5 <= len(raw) <= 6 and all(ch in string.ascii_uppercase + string.digits for ch in raw):
+    if 5 <= len(raw) <= 10 and all(ch in string.ascii_uppercase + string.digits for ch in raw):
         return raw
     return ""
 

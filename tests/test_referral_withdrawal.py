@@ -27,6 +27,13 @@ from vip_bot.helpers import (
 
 
 class ReferralWithdrawalTest(unittest.TestCase):
+    def test_referral_code_differs_per_bot(self):
+        c1 = format_referral_code(123456789, 'botpayment1')
+        c2 = format_referral_code(123456789, 'botpayment2')
+        self.assertNotEqual(c1, c2)
+        self.assertEqual(len(c1), 6)
+        self.assertEqual(len(c2), 6)
+
     def test_referral_code_is_short_alphanumeric(self):
         code = format_referral_code(123456789)
         self.assertRegex(code, r"^[A-Z0-9]{5,6}$")
