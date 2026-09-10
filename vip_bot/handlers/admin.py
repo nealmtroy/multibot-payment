@@ -156,14 +156,27 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
             return
 
         if text == "📦 Kelola Paket VIP":
+            bots = await bot_manager.list_all() if bot_manager else []
+            if not bots:
+                await event.respond(
+                    "⚠️ <b>Belum Ada Bot Payment Terdaftar</b>\n\n"
+                    "Untuk mengelola paket VIP, kamu harus menambahkan dan menghubungkan bot payment terlebih dahulu.\n\n"
+                    "👉 Silakan buka menu:\n"
+                    "<b>🤖 Kelola Bot Payment</b> ➡️ <b>➕ Tambah Bot Baru</b>",
+                    parse_mode="html",
+                    buttons=admin_main_menu_keyboard(),
+                )
+                return
+
+            buttons = [
+                [Button.inline(f"🤖 {b['bot_code']}" + (f" (@{b['bot_username']})" if b.get('bot_username') else ""), data=f"adm_pkgbot_menu:{b['bot_code']}")]
+                for b in bots
+            ]
             await event.respond(
                 "📦 <b>Menu Kelola Paket VIP</b>\n\n"
-                "Pilih aksi di bawah:\n"
-                "• <b>➕ Tambah Paket VIP</b>: Tambah grup VIP baru untuk bot tertentu\n"
-                "• <b>📑 Daftar Paket VIP</b>: Lihat seluruh paket per bot\n"
-                "• <b>🗑️ Hapus Paket VIP</b>: Hapus paket VIP",
+                "Silakan pilih bot payment yang ingin kamu kelola paket VIP-nya:",
                 parse_mode="html",
-                buttons=admin_package_menu_keyboard(),
+                buttons=buttons,
             )
             return
 
@@ -339,19 +352,32 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
     async def admin_package_actions(event):
         text = event.raw_text.strip()
 
+        bots = await bot_manager.list_all() if bot_manager else []
+        if not bots:
+            await event.respond(
+                "⚠️ <b>Belum Ada Bot Payment Terdaftar</b>\n\n"
+                "Untuk mengelola paket VIP, kamu harus menambahkan bot payment terlebih dahulu.\n\n"
+                "👉 Silakan buka menu:\n"
+                "<b>🤖 Kelola Bot Payment</b> ➡️ <b>➕ Tambah Bot Baru</b>",
+                parse_mode="html",
+                buttons=admin_main_menu_keyboard(),
+            )
+            return
+
         if text == "📑 Daftar Paket VIP":
-            packages = await db.list_all_packages()
-            await event.respond(package_list_text(packages), parse_mode="html")
+            if len(bots) == 1:
+                pkgs = await db.list_all_packages(bot_code=bots[0]["bot_code"])
+                await event.respond(package_list_text(pkgs, bot_code=bots[0]["bot_code"]), parse_mode="html")
+            else:
+                buttons = [
+                    [Button.inline(f"🤖 {b['bot_code']}", data=f"adm_pkgbot_menu:{b['bot_code']}")]
+                    for b in bots
+                ]
+                await event.respond("Pilih bot payment untuk melihat dan mengelola paket VIP:", buttons=buttons)
             return
 
         if text == "➕ Tambah Paket VIP":
-            bots = await bot_manager.list_all() if bot_manager else []
-            if not bots:
-                await event.respond("Belum ada bot payment terdaftar. Silakan tambahkan bot payment terlebih dahulu.")
-                return
-
             if len(bots) == 1:
-                # Auto select single bot
                 admin_states[event.sender_id] = {
                     "action": "add_package",
                     "step": "code",
@@ -373,15 +399,23 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
             return
 
         if text == "🗑️ Hapus Paket VIP":
-            packages = await db.list_all_packages()
-            if not packages:
-                await event.respond("Belum ada paket VIP yang terdaftar.")
-                return
-            buttons = [
-                [Button.inline(f"🗑️ {p['code']} ({p['bot_code']}) - {format_button_amount(p['amount'])}", data=f"adm_delpkg:{p['bot_code']}:{p['code']}")]
-                for p in packages
-            ]
-            await event.respond("Pilih paket VIP yang ingin dihapus:", buttons=buttons)
+            if len(bots) == 1:
+                pkgs = await db.list_all_packages(bot_code=bots[0]["bot_code"])
+                active_pkgs = [p for p in pkgs if p.get("active", True)]
+                if not active_pkgs:
+                    await event.respond(f"Belum ada paket VIP aktif untuk bot [{bots[0]['bot_code']}].")
+                    return
+                buttons = [
+                    [Button.inline(f"🗑️ {p['code']} - {format_button_amount(p['amount'])}", data=f"adm_delpkg:{bots[0]['bot_code']}:{p['code']}")]
+                    for p in active_pkgs
+                ]
+                await event.respond(f"Pilih paket VIP bot [{bots[0]['bot_code']}] yang ingin dihapus:", buttons=buttons)
+            else:
+                buttons = [
+                    [Button.inline(f"🤖 {b['bot_code']}", data=f"adm_delpkg_bot:{b['bot_code']}")]
+                    for b in bots
+                ]
+                await event.respond("Pilih bot payment yang paketnya ingin dihapus:", buttons=buttons)
             return
 
     # -------------------------------------------------------------------------
@@ -821,13 +855,100 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                 await send_log(client, config, db, f"<b>Bot Deleted</b>\nCode: <code>{html.escape(bot_code)}</code>\nAdmin: <code>{event.sender_id}</code>")
             return
 
+        # 5b. Select Bot Package Menu Dashboard
+        if data.startswith("adm_pkgbot_menu:"):
+            bot_code = data.split(":")[1]
+            pkgs = await db.list_all_packages(bot_code=bot_code)
+            bots = await bot_manager.list_all() if bot_manager else []
+            bot_info = next((b for b in bots if b["bot_code"] == bot_code), None)
+
+            status_badge = "🟢 Aktif / Online" if (bot_info and bot_info["status"] == "online") else "🔴 Nonaktif"
+            bot_username = f"@{bot_info['bot_username']}" if (bot_info and bot_info.get("bot_username")) else "-"
+            bot_name = bot_info.get("bot_name") or bot_code if bot_info else bot_code
+
+            lines = [
+                f"📦 <b>Kelola Paket VIP — [{html.escape(bot_code)}]</b>\n",
+                f"• Bot: <b>{html.escape(bot_name)}</b> ({html.escape(bot_username)})",
+                f"• Status: <b>{status_badge}</b>",
+                f"• Total Paket VIP: <b>{len(pkgs)} paket</b>\n",
+            ]
+
+            if pkgs:
+                lines.append("<b>Daftar Paket Terdaftar:</b>")
+                for p in pkgs:
+                    p_status = "🟢" if p.get("active", True) else "🔴"
+                    lines.append(f"{p_status} <code>{html.escape(p['code'])}</code>: {html.escape(p['name'])} — <b>{format_button_amount(p['amount'])}</b>")
+            else:
+                lines.append("<i>Belum ada paket VIP untuk bot ini.</i>")
+
+            lines.append("\nPilih aksi di bawah:")
+
+            buttons = [
+                [Button.inline("➕ Tambah Paket VIP", data=f"adm_addpkg_bot:{bot_code}")],
+            ]
+            if pkgs:
+                buttons.append([Button.inline("🗑️ Hapus Paket VIP", data=f"adm_delpkg_bot:{bot_code}")])
+            buttons.append([Button.inline("🔙 Pilih Bot Lain", data="adm_pkg_choose_bot")])
+
+            await event.edit("\n".join(lines), parse_mode="html", buttons=buttons)
+            return
+
+        if data == "adm_pkg_choose_bot":
+            bots = await bot_manager.list_all() if bot_manager else []
+            if not bots:
+                await event.edit(
+                    "⚠️ <b>Belum Ada Bot Payment Terdaftar</b>\n\n"
+                    "Silakan tambah bot payment terlebih dahulu di menu <b>🤖 Kelola Bot Payment</b>.",
+                    parse_mode="html",
+                )
+                return
+            buttons = [
+                [Button.inline(f"🤖 {b['bot_code']}" + (f" (@{b['bot_username']})" if b.get('bot_username') else ""), data=f"adm_pkgbot_menu:{b['bot_code']}")]
+                for b in bots
+            ]
+            await event.edit(
+                "📦 <b>Menu Kelola Paket VIP</b>\n\n"
+                "Silakan pilih bot payment yang ingin kamu kelola paket VIP-nya:",
+                parse_mode="html",
+                buttons=buttons,
+            )
+            return
+
+        if data.startswith("adm_delpkg_bot:"):
+            bot_code = data.split(":")[1]
+            pkgs = await db.list_all_packages(bot_code=bot_code)
+            active_pkgs = [p for p in pkgs if p.get("active", True)]
+            if not active_pkgs:
+                await event.edit(
+                    f"Belum ada paket VIP aktif untuk bot <b>[{html.escape(bot_code)}]</b>.",
+                    parse_mode="html",
+                    buttons=[[Button.inline(f"🔙 Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")]],
+                )
+                return
+
+            buttons = [
+                [Button.inline(f"🗑️ {p['code']} - {format_button_amount(p['amount'])}", data=f"adm_delpkg:{bot_code}:{p['code']}")]
+                for p in active_pkgs
+            ]
+            buttons.append([Button.inline(f"🔙 Batal / Kembali", data=f"adm_pkgbot_menu:{bot_code}")])
+            await event.edit(
+                f"Pilih paket VIP bot <b>[{html.escape(bot_code)}]</b> yang ingin dihapus:",
+                parse_mode="html",
+                buttons=buttons,
+            )
+            return
+
         # 6. Delete Package
         if data.startswith("adm_delpkg:"):
             parts = data.split(":")
             bot_code = parts[1]
             pkg_code = parts[2]
             await db.delete_package(pkg_code, bot_code=bot_code)
-            await event.edit(f"🗑️ Paket <code>{html.escape(pkg_code)}</code> ({html.escape(bot_code)}) berhasil dinonaktifkan.", parse_mode="html")
+            await event.edit(
+                f"🗑️ Paket <code>{html.escape(pkg_code)}</code> ({html.escape(bot_code)}) berhasil dinonaktifkan.",
+                parse_mode="html",
+                buttons=[[Button.inline(f"🔙 Kembali ke Paket [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")]],
+            )
             return
 
         # 7. Select Bot for Add Package
