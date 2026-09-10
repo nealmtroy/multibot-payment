@@ -36,47 +36,17 @@ LOGGER = logging.getLogger("telegram_vip_bot.handlers.admin")
 async def require_admin(event, config, db):
     if is_admin(config, event.sender_id):
         return True
-    await send_log(
-        event.client,
-        config,
-        db,
-        (
-            "<b>Unauthorized admin command</b>\n"
-            f"User: <code>{event.sender_id}</code>\n"
-            f"Chat: <code>{event.chat_id}</code>\n"
-            f"Command: <code>{html.escape(event.raw_text or '')}</code>"
-        ),
-    )
-    await event.respond("Command ini khusus admin.")
+    if event.is_private:
+        await event.respond("⛔ <b>Akses Ditolak</b>\nBot ini khusus manajemen admin.", parse_mode="html")
     return False
 
 
 async def require_log_chat(event, config, db):
-    try:
-        log_chat_id = await runtime_log_chat_id(config, db)
-    except Exception as exc:
-        LOGGER.warning("Failed to load runtime log_chat_id for command guard: %s", exc)
-        log_chat_id = config.log_chat_id
-    if event.chat_id == log_chat_id and not event.is_private:
-        return True
-    await event.respond("Command ini cuma bisa dipakai di group/channel logging.")
-    return False
+    return True
 
 
 async def require_admin_logchat(event, config, db):
-    if not is_admin(config, event.sender_id):
-        return False
-    try:
-        log_chat_id = await runtime_log_chat_id(config, db)
-    except Exception as exc:
-        LOGGER.warning("Failed to load runtime log_chat_id for command guard: %s", exc)
-        log_chat_id = config.log_chat_id
-    if event.chat_id == log_chat_id and not event.is_private:
-        return True
-    if event.is_private:
-        return False
-    await event.respond("Command ini cuma bisa dipakai di group/channel logging.")
-    return False
+    return await require_admin(event, config, db)
 
 
 def parse_package_add_args(raw):
@@ -111,6 +81,37 @@ def parse_package_add_args(raw):
 
 
 def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_manager=None):
+    @client.on(events.NewMessage(pattern=r"^/start(?:@\w+)?(?:\s+.*)?$"))
+    async def admin_start_handler(event):
+        if not is_admin(config, event.sender_id):
+            if event.is_private:
+                await event.respond(
+                    "⛔ <b>Akses Ditolak</b>\n"
+                    "Bot ini adalah <b>Master Management Bot</b> dan hanya dapat diakses oleh Administrator terdaftar.",
+                    parse_mode="html",
+                )
+            return
+
+        bots = await bot_manager.list_all() if bot_manager else []
+        active_count = sum(1 for b in bots if b["status"] == "online")
+        dashboard_text = (
+            f"👋 <b>Halo Admin! Selamat datang di Master Management Bot</b>\n\n"
+            f"• Status Sistem: 🟢 <b>Online</b>\n"
+            f"• Bot Payment Berjalan: <b>{active_count} bot</b>\n\n"
+            f"{admin_command_list_text()}"
+        )
+        await event.respond(dashboard_text, parse_mode="html")
+
+    @client.on(events.NewMessage(func=lambda e: e.is_private and not is_admin(config, e.sender_id)))
+    async def reject_unauthorized_private(event):
+        text = (event.raw_text or "").strip()
+        if not text.startswith("/start"):
+            await event.respond(
+                "⛔ <b>Akses Ditolak</b>\n"
+                "Bot ini hanya dapat digunakan oleh Administrator terdaftar.",
+                parse_mode="html",
+            )
+
     # -------------------------------------------------------------------------
     # Bot Management Commands
     # -------------------------------------------------------------------------
@@ -158,10 +159,12 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                 config,
                 db,
                 (
-                    "<b>Bot Spawned & Active</b>\n"
-                    f"Code: <code>{html.escape(bot_code)}</code>\n"
-                    f"Username: <b>{username_str}</b>\n"
-                    f"Admin: <code>{event.sender_id}</code>"
+                    "🤖 <b>Bot Payment Baru Aktif!</b>\n"
+                    f"• Nama Bot: <b>{html.escape(res.get('bot_name', bot_code))}</b>\n"
+                    f"• Username: <b>{username_str}</b>\n"
+                    f"• Kode Bot: <code>{html.escape(bot_code)}</code>\n"
+                    f"• Ditambahkan oleh Admin: <code>{event.sender_id}</code>\n"
+                    "• Status: 🟢 Online & Siap Digunakan"
                 ),
             )
         except Exception as exc:

@@ -1,11 +1,12 @@
 import asyncio
+import html
 import logging
 from telethon import TelegramClient
 from vip_bot.config import load_config
 from vip_bot.db import Database
 from vip_bot.helpers import send_log
 from vip_bot.loops import polling_loop, broadcast_loop
-from vip_bot.handlers import register_handlers
+from vip_bot.handlers.admin import register_admin_handlers
 from vip_bot.bot_manager import BotManager
 
 LOGGER = logging.getLogger("telegram_vip_bot")
@@ -30,32 +31,52 @@ async def start_bot():
     )
     bot_manager.set_master_client(master_client)
 
-    register_handlers(
+    # Master bot is exclusively the Management Bot (Admin only)
+    register_admin_handlers(
         master_client,
         config,
         db,
         qris_semaphore,
         user_locks,
-        withdrawal_states,
         bot_manager=bot_manager,
-        bot_code="default",
     )
 
     await master_client.start(bot_token=config.bot_token)
     me = await master_client.get_me()
-    master_client.bot_code = "default"
+    master_client.bot_code = "master"
     master_client.bot_username = getattr(me, "username", "") or ""
-    master_client.bot_name = "Master Bot"
+    master_client.bot_name = "Management Bot"
 
-    LOGGER.info("Master bot started (@%s)", master_client.bot_username)
-    await send_log(
-        master_client,
-        config,
-        db,
-        f"<b>MultiBot Payment System started</b>\nDatabase: Native PostgreSQL\nMaster Bot: @{master_client.bot_username}",
-    )
+    LOGGER.info("Management Bot started (@%s)", master_client.bot_username)
 
+    # Auto-start all registered payment bots from database
     await bot_manager.start_all_from_db()
+
+    # Formulate startup notification message
+    bots = await bot_manager.list_all()
+    active_bots = [b for b in bots if b["status"] == "online"]
+
+    if active_bots:
+        bot_lines = []
+        for idx, b in enumerate(active_bots, 1):
+            uname = f"(@{b['bot_username']})" if b.get("bot_username") else ""
+            bot_lines.append(
+                f"{idx}. 🟢 <b>{html.escape(b['bot_code'])}</b> {uname} - Paket VIP: <b>{b['package_count']}</b>"
+            )
+        bot_list_str = "\n".join(bot_lines)
+        startup_msg = (
+            "🚀 <b>MultiBot Payment has been started!</b>\n\n"
+            "<b>Bot yang berjalan:</b>\n"
+            f"{bot_list_str}"
+        )
+    else:
+        startup_msg = (
+            "🚀 <b>MultiBot Payment has been started!</b>\n\n"
+            "<i>Tidak ada bot yang aktif saat ini.</i>\n\n"
+            f"Gunakan <code>/bot_add &lt;nama_bot&gt; &lt;bot_token&gt;</code> di Private Chat @{master_client.bot_username} untuk menambahkan bot baru."
+        )
+
+    await send_log(master_client, config, db, startup_msg)
 
     asyncio.create_task(polling_loop(bot_manager, config, db))
     asyncio.create_task(broadcast_loop(bot_manager, config, db))

@@ -60,6 +60,7 @@ class BotManager:
         client.bot_code = bot_code
         client.bot_username = bot_username
         client.bot_name = bot_name
+        client.master_client = self.master_client
 
         # Register user handlers for this bot instance
         register_user_handlers(

@@ -442,6 +442,8 @@ async def runtime_log_chat_id(config, db):
 
 
 async def send_log(client, config, db, text, **kwargs):
+    # Always route logging through the Master Management Bot if available
+    sender = getattr(client, "master_client", None) or client
     try:
         log_chat_id = await runtime_log_chat_id(config, db)
     except Exception as exc:
@@ -450,7 +452,7 @@ async def send_log(client, config, db, text, **kwargs):
     if not log_chat_id:
         return
     try:
-        await client.send_message(log_chat_id, text, parse_mode="html", link_preview=False, **kwargs)
+        await sender.send_message(log_chat_id, text, parse_mode="html", link_preview=False, **kwargs)
     except Exception as exc:
         LOGGER.warning("Failed to send log message to %s: %s", log_chat_id, exc)
 
