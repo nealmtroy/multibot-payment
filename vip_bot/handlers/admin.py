@@ -42,11 +42,7 @@ LOGGER = logging.getLogger("telegram_vip_bot.handlers.admin")
 
 
 async def require_admin(event, config, db):
-    if is_admin(config, event.sender_id):
-        return True
-    if event.is_private:
-        await event.respond("⛔ <b>Akses Ditolak</b>\nBot ini khusus manajemen admin.", parse_mode="html")
-    return False
+    return is_admin(config, event.sender_id)
 
 
 async def require_log_chat(event, config, db):
@@ -116,28 +112,11 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
     @client.on(events.NewMessage(pattern=r"^/(?:start|menu|commands?|help)(?:@\w+)?(?:\s+.*)?$"))
     async def admin_start_handler(event):
         if not is_admin(config, event.sender_id):
-            if event.is_private:
-                await event.respond(
-                    "⛔ <b>Akses Ditolak</b>\n"
-                    "Bot ini adalah <b>Master Management Bot</b> dan hanya dapat diakses oleh Administrator terdaftar.",
-                    parse_mode="html",
-                )
             return
         admin_states.pop(event.sender_id, None)
         await send_dashboard(event)
 
-    # -------------------------------------------------------------------------
-    # Block unauthorized private messages
-    # -------------------------------------------------------------------------
-    @client.on(events.NewMessage(func=lambda e: e.is_private and not is_admin(config, e.sender_id)))
-    async def reject_unauthorized_private(event):
-        text = (event.raw_text or "").strip()
-        if not text.startswith(("/start", "/menu")):
-            await event.respond(
-                "⛔ <b>Akses Ditolak</b>\n"
-                "Bot ini hanya dapat digunakan oleh Administrator terdaftar.",
-                parse_mode="html",
-            )
+
 
     # -------------------------------------------------------------------------
     # Top-Level ReplyKeyboardMarkup Menu Routing
@@ -759,7 +738,6 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
     @client.on(events.CallbackQuery())
     async def admin_callback_dispatcher(event):
         if not is_admin(config, event.sender_id):
-            await event.answer("Khusus admin.", alert=True)
             return
 
         data = event.data.decode(errors="ignore")
