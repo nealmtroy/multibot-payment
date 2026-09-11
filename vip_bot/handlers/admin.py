@@ -402,13 +402,12 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
         if text == "🗑️ Hapus Paket VIP":
             if len(bots) == 1:
                 pkgs = await db.list_all_packages(bot_code=bots[0]["bot_code"])
-                active_pkgs = [p for p in pkgs if p.get("active", True)]
-                if not active_pkgs:
-                    await event.respond(f"Belum ada paket VIP aktif untuk bot [{bots[0]['bot_code']}].")
+                if not pkgs:
+                    await event.respond(f"Belum ada paket VIP untuk bot [{bots[0]['bot_code']}].")
                     return
                 buttons = [
                     [Button.inline(f"🗑️ {p['code']} - {format_button_amount(p['amount'])}", data=f"adm_delpkg:{bots[0]['bot_code']}:{p['code']}")]
-                    for p in active_pkgs
+                    for p in pkgs
                 ]
                 await event.respond(f"Pilih paket VIP bot [{bots[0]['bot_code']}] yang ingin dihapus:", buttons=buttons)
             else:
@@ -934,10 +933,9 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
         if data.startswith("adm_delpkg_bot:"):
             bot_code = data.split(":")[1]
             pkgs = await db.list_all_packages(bot_code=bot_code)
-            active_pkgs = [p for p in pkgs if p.get("active", True)]
-            if not active_pkgs:
+            if not pkgs:
                 await event.edit(
-                    f"Belum ada paket VIP aktif untuk bot <b>[{html.escape(bot_code)}]</b>.",
+                    f"Belum ada paket VIP untuk bot <b>[{html.escape(bot_code)}]</b>.",
                     parse_mode="html",
                     buttons=[[Button.inline(f"🔙 Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")]],
                 )
@@ -945,7 +943,7 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
 
             buttons = [
                 [Button.inline(f"🗑️ {p['code']} - {format_button_amount(p['amount'])}", data=f"adm_delpkg:{bot_code}:{p['code']}")]
-                for p in active_pkgs
+                for p in pkgs
             ]
             buttons.append([Button.inline(f"🔙 Batal / Kembali", data=f"adm_pkgbot_menu:{bot_code}")])
             await event.edit(
@@ -962,7 +960,7 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
             pkg_code = parts[2]
             await db.delete_package(pkg_code, bot_code=bot_code)
             await event.edit(
-                f"🗑️ Paket <code>{html.escape(pkg_code)}</code> ({html.escape(bot_code)}) berhasil dinonaktifkan.",
+                f"🗑️ Paket <code>{html.escape(pkg_code)}</code> ({html.escape(bot_code)}) berhasil dihapus.",
                 parse_mode="html",
                 buttons=[[Button.inline(f"🔙 Kembali ke Paket [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")]],
             )

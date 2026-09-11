@@ -133,10 +133,10 @@ class Database:
             return record_to_dict(row)
 
     async def delete_package(self, code: str, bot_code: str = "default") -> bool:
-        query = "UPDATE packages SET active = false, updated_at = now() WHERE bot_code = $1 AND code = $2"
+        query = "DELETE FROM packages WHERE bot_code = $1 AND code = $2"
         async with self.pool.acquire() as conn:
             res = await conn.execute(query, bot_code, code)
-            return "UPDATE 1" in res
+            return "DELETE 1" in res
 
     # -------------------------------------------------------------------------
     # User & Referral Methods (Scoped per bot_code)
