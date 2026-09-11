@@ -3,6 +3,7 @@ import io
 import html
 import logging
 from telethon import events, Button, errors
+from vip_bot.config import MIN_WITHDRAWAL_AMOUNT
 from vip_bot.helpers import (
     create_qris_with_retries_sync,
     public_invoice_id,
@@ -391,12 +392,22 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
 
     @client.on(events.CallbackQuery(data=b"withdraw_start"))
     async def start_withdrawal_flow(event):
+        stats = await db.referral_stats(event.sender_id, bot_code=bot_code)
+        if stats["balance"] < MIN_WITHDRAWAL_AMOUNT:
+            await event.answer(
+                f"Saldo kamu ({format_rupiah(stats['balance'])}) belum mencapai batas minimal penarikan Rp10.000.",
+                alert=True,
+            )
+            return
+
         state_key = (event.sender_id, bot_code)
         withdrawal_states[state_key] = {"step": "amount"}
         await event.answer()
         await event.respond(
-            "Masukkan nominal penarikan saldo (contoh: <code>50000</code>). Minimal Rp10.000.",
+            f"Saldo kamu saat ini: <b>{format_rupiah(stats['balance'])}</b>\n\n"
+            "Masukkan nominal penarikan saldo (contoh: <code>50000</code>). Minimal Rp10.000:",
             parse_mode="html",
+            buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
         )
 
     @client.on(events.CallbackQuery(pattern=rb"^pkg:(.+)$"))
@@ -418,6 +429,14 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
             bot_code=bot_code,
         )
 
+    @client.on(events.NewMessage(pattern=r"^/(?:cancel|batal)$"))
+    @private_only
+    async def cancel_withdrawal_command(event):
+        state_key = (event.sender_id, bot_code)
+        if state_key in withdrawal_states:
+            withdrawal_states.pop(state_key, None)
+            await event.respond("Penarikan saldo dibatalkan.", buttons=main_menu_buttons())
+
     @client.on(events.NewMessage(func=lambda e: bool(e.is_private and (e.sender_id, bot_code) in withdrawal_states and not (e.raw_text or "").startswith("/"))))
     @private_only
     async def withdrawal_step_message(event):
@@ -427,46 +446,103 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
             return
         user = await event.get_sender()
         text = (event.raw_text or "").strip()
+
+        # Handle cancel / exit keywords
+        if text.lower() in ("batal", "cancel", "❌ batal", "batalkan", "kembali"):
+            withdrawal_states.pop(state_key, None)
+            await event.respond("Penarikan saldo dibatalkan.", buttons=main_menu_buttons())
+            return
+
+        # Handle menu button routing if user clicked ReplyKeyboardMarkup
+        if text in (buy_label, profile_label, withdrawal_label):
+            withdrawal_states.pop(state_key, None)
+            if text == buy_label:
+                await send_package_menu(event, config, db, bot_code=bot_code)
+            elif text == profile_label:
+                await send_profile(event, config, db, bot_code=bot_code)
+            elif text == withdrawal_label:
+                await send_withdrawal_menu(event, config, db, bot_code=bot_code)
+            return
+
         step = state.get("step")
 
         if step == "amount":
-            amount = parse_withdrawal_amount(text)
-            if not amount:
-                await event.respond("Nominal harus berupa angka bulat minimal 10000. Masukkan kembali nominal:")
-                return
             stats = await db.referral_stats(user.id, bot_code=bot_code)
-            if not valid_withdrawal_amount(amount, stats["balance"]):
+            if stats["balance"] < MIN_WITHDRAWAL_AMOUNT:
+                withdrawal_states.pop(state_key, None)
                 await event.respond(
-                    f"Saldo tidak cukup atau kurang dari batas minimal. Saldo kamu: <b>{format_rupiah(stats['balance'])}</b>. Masukkan kembali nominal:",
+                    f"Saldo tidak cukup atau kurang dari batas minimal.\n"
+                    f"Saldo kamu: <b>{format_rupiah(stats['balance'])}</b> (Minimal penarikan Rp10.000).\n\n"
+                    "Penarikan saldo dibatalkan.",
                     parse_mode="html",
+                    buttons=main_menu_buttons(),
                 )
                 return
+
+            amount = parse_withdrawal_amount(text)
+            if not amount:
+                await event.respond(
+                    "Nominal harus berupa angka bulat minimal 10000 (contoh: <code>50000</code>).\n\n"
+                    "Masukkan kembali nominal atau klik Batalkan:",
+                    parse_mode="html",
+                    buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
+                )
+                return
+
+            if not valid_withdrawal_amount(amount, stats["balance"]):
+                await event.respond(
+                    f"Saldo tidak cukup atau kurang dari batas minimal.\n"
+                    f"Saldo kamu: <b>{format_rupiah(stats['balance'])}</b>.\n\n"
+                    "Masukkan nominal yang sesuai atau klik Batalkan:",
+                    parse_mode="html",
+                    buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
+                )
+                return
+
             state["amount"] = amount
             state["step"] = "phone"
-            await event.respond("Masukkan nomor HP yang terdaftar di E-Wallet:")
+            await event.respond(
+                "Masukkan nomor HP yang terdaftar di E-Wallet:",
+                buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
+            )
             return
 
         if step == "phone":
             if not text:
-                await event.respond("Nomor HP tidak boleh kosong:")
+                await event.respond(
+                    "Nomor HP tidak boleh kosong. Masukkan nomor HP:",
+                    buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
+                )
                 return
             state["phone"] = text
             state["step"] = "wallet_name"
-            await event.respond("Masukkan nama E-Wallet (contoh: DANA, OVO, GoPay):")
+            await event.respond(
+                "Masukkan nama E-Wallet (contoh: DANA, OVO, GoPay):",
+                buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
+            )
             return
 
         if step == "wallet_name":
             if not text:
-                await event.respond("Nama E-Wallet tidak boleh kosong:")
+                await event.respond(
+                    "Nama E-Wallet tidak boleh kosong. Masukkan nama E-Wallet:",
+                    buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
+                )
                 return
             state["wallet_name"] = text
             state["step"] = "account_name"
-            await event.respond("Masukkan nama pemilik rekening / akun E-Wallet:")
+            await event.respond(
+                "Masukkan nama pemilik rekening / akun E-Wallet:",
+                buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
+            )
             return
 
         if step == "account_name":
             if not text:
-                await event.respond("Nama pemilik akun tidak boleh kosong:")
+                await event.respond(
+                    "Nama pemilik akun tidak boleh kosong. Masukkan nama pemilik akun:",
+                    buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
+                )
                 return
             state["account_name"] = text
             state["step"] = "confirm"
