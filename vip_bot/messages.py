@@ -116,8 +116,7 @@ def main_menu_buttons():
 def main_menu_keyboard_text(user, bot_name=""):
     from vip_bot.helpers import display_name
     name = display_name(user) or "kak"
-    bot_label = f"@{html.escape(bot_name)}" if bot_name else "@boboinaja"
-    return f"Hi {html.escape(name)}, Welcome di Bot Payment {bot_label}."
+    return f"Halo {html.escape(name)}, selamat datang!\nSilakan pilih menu di bawah untuk mengakses layanan VIP."
 
 
 def default_package(config, bot_code="default", vip_chat_id=None):

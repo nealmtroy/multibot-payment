@@ -253,12 +253,10 @@ async def send_profile(event, config, db, bot_code="default"):
         stats = await db.referral_stats(user.id, bot_code=bot_code)
         me = await event.client.get_me()
         code = stats["referral_code"]
-        link = f"https://t.me/{me.username}?start=ref_{code}" if me.username else f"ref_{code}"
-        bot_display = getattr(event.client, "bot_name", "") or (f"@{me.username}" if getattr(me, "username", None) else "")
-        detail_lines = []
-        if bot_display:
-            detail_lines.append(f"<b>Bot</b>: <b>{html.escape(bot_display)}</b>")
-        detail_lines.append(f"<b>User ID</b>: <code>{user.id}</code>")
+        link = f"https://t.me/{me.username}?start=ref_{code}" if getattr(me, "username", None) else f"ref_{code}"
+        detail_lines = [
+            f"<b>User ID</b>: <code>{user.id}</code>",
+        ]
         if user.username:
             detail_lines.append(f"<b>Username</b>: @{html.escape(user.username)}")
         detail_lines.extend(
@@ -272,7 +270,7 @@ async def send_profile(event, config, db, bot_code="default"):
         detail_lines_str = "\n".join(detail_lines)
         lines = [
             "<b>Profile & Referral</b>",
-            "Dapatkan komisi sebesar <b>50%</b> dari setiap pembelian paket VIP melalui referral link kamu khusus bot ini.",
+            "Dapatkan komisi sebesar <b>50%</b> dari setiap pembelian paket VIP melalui referral link kamu.",
             "",
             f"<blockquote>{detail_lines_str}</blockquote>",
         ]
@@ -317,7 +315,11 @@ async def create_withdrawal_request(event, config, db, user, amount, details, bo
     try:
         withdrawal = await db.create_withdrawal(user, amount, details, bot_code=bot_code)
     except Exception as exc:
-        await event.respond(f"Gagal mengajukan penarikan: {html.escape(str(exc))}")
+        LOGGER.exception("Failed to create withdrawal request for user %s on bot [%s]", user.id, bot_code)
+        await event.respond(
+            "Gagal mengajukan penarikan saldo. Silakan coba lagi beberapa saat lagi.",
+            buttons=main_menu_buttons(),
+        )
         return
 
     await send_log(
@@ -356,8 +358,7 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         user = await event.get_sender()
         await db.upsert_user(user, bot_code=bot_code)
         await handle_referral_start(event, config, db, event.pattern_match.group(1) or "", bot_code=bot_code)
-        bot_name = getattr(client, "bot_name", "") or bot_code
-        await event.respond(main_menu_keyboard_text(user, bot_name=bot_name), buttons=main_menu_buttons(), parse_mode="html")
+        await event.respond(main_menu_keyboard_text(user), buttons=main_menu_buttons(), parse_mode="html")
         await send_package_menu(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(pattern=r"^/buy$"))

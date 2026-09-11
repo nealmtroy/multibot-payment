@@ -82,7 +82,8 @@ class ReferralWithdrawalTest(unittest.TestCase):
     def test_main_menu_keyboard_text_greets_user(self):
         user = SimpleNamespace(first_name="Budi", last_name="", username="budi")
         text = main_menu_keyboard_text(user)
-        self.assertEqual(text, "Hi Budi, Welcome di Bot Payment @boboinaja.")
+        self.assertIn("Halo Budi", text)
+        self.assertNotIn("boboinaja", text)
         self.assertNotIn("Menu tersedia", text)
 
     def test_main_menu_button_labels_include_buy_profile_and_withdrawal(self):
@@ -134,6 +135,39 @@ class ReferralWithdrawalTest(unittest.TestCase):
         self.assertIn("/set_broadcasttime", text)
         self.assertIn("/test_broadcast", text)
         self.assertIn("/commands", text)
+
+
+    def test_send_profile_does_not_leak_bot_code(self):
+        import asyncio
+        from vip_bot.handlers.user import send_profile
+        from unittest.mock import AsyncMock, MagicMock
+
+        async def _run():
+            event = MagicMock()
+            event.client.get_me = AsyncMock(return_value=SimpleNamespace(username="testbot"))
+            event.client.bot_name = "secret_bot_code"
+            user = SimpleNamespace(id=123456, username="tester", first_name="Test", last_name="User")
+            event.get_sender = AsyncMock(return_value=user)
+            event.respond = AsyncMock()
+            db = MagicMock()
+            db.upsert_user = AsyncMock()
+            db.referral_stats = AsyncMock(return_value={
+                "referral_code": "ref123",
+                "balance": 50000,
+                "successful_count": 5,
+                "pending_count": 2,
+            })
+            await send_profile(event, None, db, bot_code="secret_bot_code")
+            self.assertTrue(event.respond.called)
+            sent_text = event.respond.call_args[0][0]
+            self.assertNotIn("secret_bot_code", sent_text)
+            self.assertNotIn("Bot:", sent_text)
+            self.assertNotIn("khusus bot ini", sent_text)
+            self.assertIn("Profile & Referral", sent_text)
+            self.assertIn("123456", sent_text)
+            self.assertIn("Rp50.000", sent_text)
+
+        asyncio.run(_run())
 
 
 if __name__ == "__main__":
