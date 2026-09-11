@@ -133,10 +133,12 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE INDEX IF NOT EXISTS idx_payments_user ON payments (bot_code, user_id, status, id DESC);
 CREATE INDEX IF NOT EXISTS idx_payments_next_check ON payments (next_check_at ASC, id ASC) WHERE status IN ('pending', 'invite_error', 'delivery_error');
 
--- 1 active payment per user per bot
+-- 1 active payment per user per bot (excludes custom admin QRIS)
+DROP INDEX IF EXISTS idx_payments_one_active;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_one_active
 ON payments (bot_code, user_id)
-WHERE status IN ('pending', 'processing_paid', 'invite_error', 'processing_delivery', 'delivery_error');
+WHERE package_code != 'CUSTOM' AND bot_code != 'master'
+  AND status IN ('pending', 'processing_paid', 'invite_error', 'processing_delivery', 'delivery_error');
 
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
