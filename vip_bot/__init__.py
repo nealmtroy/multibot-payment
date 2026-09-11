@@ -84,7 +84,14 @@ async def start_bot():
     try:
         await master_client.run_until_disconnected()
     finally:
+        LOGGER.info("Shutting down MultiBot Payment engine...")
+        for code in list(bot_manager.active_bots.keys()):
+            try:
+                await bot_manager.stop_bot(code)
+            except Exception as exc:
+                LOGGER.warning("Error stopping bot %s during shutdown: %s", code, exc)
         await db.close()
+        LOGGER.info("Shutdown complete.")
 
 
 def run():

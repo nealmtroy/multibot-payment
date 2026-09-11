@@ -127,6 +127,15 @@ class BotManager:
 
     async def delete_bot(self, bot_code: str) -> bool:
         await self.stop_bot(bot_code)
+        # Clean up session files from disk
+        for ext in (".session", ".session-journal"):
+            session_file = self.sessions_dir / f"bot_{bot_code}{ext}"
+            try:
+                if session_file.exists():
+                    session_file.unlink()
+                    LOGGER.info("Deleted session file %s", session_file)
+            except Exception as exc:
+                LOGGER.warning("Could not delete session file %s: %s", session_file, exc)
         return await self.db.delete_bot(bot_code)
 
     async def start_all_from_db(self):
@@ -142,6 +151,20 @@ class BotManager:
                 await self.spawn_bot(bot)
             except Exception as exc:
                 LOGGER.error("Failed to spawn bot %s: %s", bot.get("bot_code"), exc)
+                if self.master_client and self.master_client.is_connected():
+                    try:
+                        from vip_bot.helpers import send_log
+                        import html
+                        await send_log(
+                            self.master_client,
+                            self.config,
+                            self.db,
+                            f"⚠️ <b>Auto-start Bot Gagal</b>\n"
+                            f"• Bot: <code>{html.escape(bot.get('bot_code', ''))}</code>\n"
+                            f"• Error: <code>{html.escape(str(exc))}</code>",
+                        )
+                    except Exception:
+                        pass
 
     async def list_all(self) -> list[dict]:
         db_bots = {b["bot_code"]: b for b in (await self.db.list_all_bots())}
