@@ -253,10 +253,11 @@ async def send_profile(event, config, db, bot_code="default"):
         me = await event.client.get_me()
         code = stats["referral_code"]
         link = f"https://t.me/{me.username}?start=ref_{code}" if me.username else f"ref_{code}"
-        detail_lines = [
-            f"<b>Bot</b>: <code>{html.escape(bot_code)}</code>",
-            f"<b>User ID</b>: <code>{user.id}</code>",
-        ]
+        bot_display = getattr(event.client, "bot_name", "") or (f"@{me.username}" if getattr(me, "username", None) else "")
+        detail_lines = []
+        if bot_display:
+            detail_lines.append(f"<b>Bot</b>: <b>{html.escape(bot_display)}</b>")
+        detail_lines.append(f"<b>User ID</b>: <code>{user.id}</code>")
         if user.username:
             detail_lines.append(f"<b>Username</b>: @{html.escape(user.username)}")
         detail_lines.extend(
@@ -292,7 +293,7 @@ async def send_withdrawal_menu(event, config, db, bot_code="default"):
         await db.upsert_user(user, bot_code=bot_code)
         stats = await db.referral_stats(event.sender_id, bot_code=bot_code)
         await event.respond(
-            f"Saldo kamu ({html.escape(bot_code)}): <b>{format_rupiah(stats['balance'])}</b>\n\nKlik tombol di bawah untuk tarik saldo.",
+            f"Saldo kamu: <b>{format_rupiah(stats['balance'])}</b>\n\nKlik tombol di bawah untuk tarik saldo.",
             parse_mode="html",
             buttons=[[Button.inline("Tarik Saldo", b"withdraw_start")]],
         )
