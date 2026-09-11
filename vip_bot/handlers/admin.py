@@ -4,7 +4,7 @@ import io
 import html
 import logging
 import re
-from telethon import events, Button, errors
+from telethon import events, Button, errors, types
 from vip_bot.config import BROADCAST_DISABLED_VALUES, BROADCAST_TIME_PATTERN
 from vip_bot.helpers import (
     is_admin,
@@ -117,11 +117,129 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
         admin_states.pop(event.sender_id, None)
         await send_dashboard(event)
 
-
-
     # -------------------------------------------------------------------------
-    # Top-Level ReplyKeyboardMarkup Menu Routing
+    # /custom <nominal>: Admin Custom QRIS in LOG_CHAT_ID
     # -------------------------------------------------------------------------
+    @client.on(events.NewMessage(pattern=r"^/custom(?:@\w+)?(?:\s+(.+))?$"))
+    async def admin_custom_qris_handler(event):
+        if not is_admin(config, event.sender_id):
+            return
+
+        log_id = await runtime_log_chat_id(config, db)
+        if not event.is_private and log_id and int(event.chat_id) != int(log_id):
+            return
+
+        raw_arg = event.pattern_match.group(1) if event.pattern_match else None
+        if not raw_arg or not raw_arg.strip():
+            await event.reply(
+                "ℹ️ <b>Format Command:</b>\n"
+                "<code>/custom &lt;nominal&gt;</code>\n\n"
+                "Contoh:\n"
+                "• <code>/custom 30000</code>\n"
+                "• <code>/custom 50.000</code>",
+                parse_mode="html",
+            )
+            return
+
+        cleaned_digits = re.sub(r"[^\d]", "", raw_arg.strip())
+        if not cleaned_digits:
+            await event.reply(
+                "❌ Nominal tidak valid. Masukkan angka nominal pembayaran.\nContoh: <code>/custom 50.000</code>",
+                parse_mode="html",
+            )
+            return
+
+        checkout_amount = int(cleaned_digits)
+        if checkout_amount < 1000 or checkout_amount > 10000000:
+            await event.reply(
+                "❌ Nominal pembayaran harus antara <b>Rp 1.000</b> hingga <b>Rp 10.000.000</b>.",
+                parse_mode="html",
+            )
+            return
+
+        loading_msg = await event.reply("⏳ <i>Membuat Custom QRIS...</i>", parse_mode="html")
+        try:
+            user = await event.get_sender()
+            if not user:
+                user = types.User(id=event.sender_id, first_name="Admin")
+
+            await db.upsert_user(user, bot_code="master")
+
+            async with qris_semaphore:
+                (
+                    _session,
+                    buyer_name,
+                    buyer_email,
+                    order_id,
+                    payment_url,
+                    qris,
+                    qr_bytes,
+                    checkout_amount,
+                ) = await asyncio.to_thread(
+                    create_qris_with_retries_sync,
+                    config,
+                    user,
+                    checkout_amount,
+                    "CUSTOM",
+                )
+
+            socia_invoice_id = qris.get("inv_id")
+            if not socia_invoice_id:
+                raise SociaBuzzError(f"QRIS response missing inv_id: {qris}")
+
+            buyer_invoice_id = public_invoice_id()
+            qr_file = io.BytesIO(qr_bytes)
+            qr_file.name = f"{buyer_invoice_id}.png"
+            payload = qris.get("data", {})
+
+            caption_text = custom_qris_caption(
+                inv_id=buyer_invoice_id,
+                checkout_amount=checkout_amount,
+                final_amount=payload.get("amount") or "",
+                expires=payload.get("countdown") or "",
+                user=user,
+            )
+
+            qris_msg = await event.reply(
+                caption_text,
+                file=qr_file,
+                parse_mode="html",
+            )
+            try:
+                await client.delete_messages(event.chat_id, [loading_msg.id])
+            except Exception:
+                pass
+
+            await db.create_payment(
+                user=user,
+                public_invoice_id=buyer_invoice_id,
+                order_id=order_id,
+                payment_url=payment_url,
+                inv_id=socia_invoice_id,
+                amount=checkout_amount,
+                buyer_name=buyer_name,
+                buyer_email=buyer_email,
+                qris_data=qris,
+                qris_chat_id=event.chat_id,
+                qris_message_id=qris_msg.id,
+                package={
+                    "code": "CUSTOM",
+                    "name": "Custom QRIS",
+                    "amount": checkout_amount,
+                    "vip_chat_id": 0,
+                    "invite_expire_hours": 0,
+                },
+                referral=None,
+                bot_code="master",
+            )
+        except Exception as exc:
+            LOGGER.exception("Failed to create custom QRIS: %s", exc)
+            err_msg = f"❌ <b>Gagal membuat Custom QRIS:</b>\n<code>{html.escape(str(exc))}</code>"
+            try:
+                await client.edit_message(event.chat_id, loading_msg.id, err_msg, parse_mode="html")
+            except Exception:
+                await event.reply(err_msg, parse_mode="html")
+
     @client.on(events.NewMessage(func=lambda e: is_admin(config, e.sender_id) and e.raw_text in (
         "🤖 Kelola Bot Payment",
         "📦 Kelola Paket VIP",

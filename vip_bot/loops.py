@@ -106,6 +106,30 @@ async def credit_referral_if_needed(client, config, db, payment):
 
 async def process_paid_payment(client, config, db, payment):
     bot_code = payment.get("bot_code") or "default"
+    is_custom = payment.get("package_code") == "CUSTOM" or not payment.get("vip_chat_id")
+    if is_custom:
+        if not (await db.claim_paid_processing(payment["inv_id"])):
+            return
+        await delete_qris_message(client, payment)
+        await db.mark_delivery_done(payment["inv_id"])
+        await send_log(
+            client,
+            config,
+            db,
+            (
+                f"✅ <b>[{html.escape(bot_code)}] CUSTOM QRIS PAID</b>\n\n"
+                "<blockquote>"
+                f"<b>Requester</b>: {user_link(payment)} (<code>{payment['user_id']}</code>)\n"
+                f"<b>Nominal</b>: {format_rupiah(payment.get('amount') or 0)}\n"
+                f"<b>Nominal QRIS</b>: <code>{html.escape(payment.get('qris_amount') or '')}</code>\n"
+                f"<b>Invoice</b>: <code>{html.escape(payment.get('public_invoice_id') or payment['inv_id'])}</code>\n"
+                f"<b>Internal Invoice</b>: <code>{html.escape(payment['inv_id'])}</code>\n"
+                f"<b>Order ID</b>: <code>{html.escape(payment.get('order_id') or '')}</code>"
+                "</blockquote>"
+            ),
+        )
+        return
+
     if payment["status"] == "delivery_error":
         invite_link = payment.get("invite_link") or ""
         invite_expires_at = payment.get("invite_expires_at") or ""
@@ -283,17 +307,19 @@ async def poll_once(bot_manager_or_client, config, db, payment):
 async def expire_pending_payment(client, config, db, payment, title="Payment expired"):
     bot_code = payment.get("bot_code") or "default"
     await db.mark_payment_timeout(payment["inv_id"])
-    packages = await db.list_packages(bot_code=bot_code)
     await delete_qris_message(client, payment)
-    await safe_send_user(
-        client,
-        config,
-        db,
-        payment["user_id"],
-        timeout_payment_message(),
-        parse_mode="html",
-        buttons=package_buttons(config, packages, bot_code=bot_code),
-    )
+    is_custom = payment.get("package_code") == "CUSTOM" or not payment.get("vip_chat_id")
+    if not is_custom:
+        packages = await db.list_packages(bot_code=bot_code)
+        await safe_send_user(
+            client,
+            config,
+            db,
+            payment["user_id"],
+            timeout_payment_message(),
+            parse_mode="html",
+            buttons=package_buttons(config, packages, bot_code=bot_code),
+        )
     await send_log(
         client,
         config,

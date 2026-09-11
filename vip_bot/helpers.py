@@ -26,6 +26,10 @@ from sociabuzz_client import (
 from vip_bot.config import (
     FIRST_NAMES,
     LAST_NAMES,
+    FIRST_NAMES_MAN,
+    LAST_NAMES_MAN,
+    FIRST_NAMES_WOMAN,
+    LAST_NAMES_WOMAN,
     MIN_WITHDRAWAL_AMOUNT,
     WIB,
     BROADCAST_DISABLED_VALUES,
@@ -116,10 +120,17 @@ def display_name(user):
 
 
 def random_indonesian_identity():
-    first = secrets.choice(FIRST_NAMES)
-    last = secrets.choice(LAST_NAMES)
+    gender = secrets.choice(["man", "woman"])
+    if gender == "man":
+        first = secrets.choice(FIRST_NAMES_MAN)
+        last = secrets.choice(LAST_NAMES_MAN)
+    else:
+        first = secrets.choice(FIRST_NAMES_WOMAN)
+        last = secrets.choice(LAST_NAMES_WOMAN)
     num = random.randint(1000, 999999)
-    email = f"{first.lower()}.{last.lower()}{num}@gmail.com"
+    clean_first = re.sub(r"[^a-zA-Z0-9]", "", first.lower())
+    clean_last = re.sub(r"[^a-zA-Z0-9]", "", last.lower())
+    email = f"{clean_first}.{clean_last}{num}@gmail.com"
     return f"{first} {last}", email
 
 
