@@ -102,10 +102,11 @@ class BotManager:
             "status": "active",
         }
 
-    async def stop_bot(self, bot_code: str) -> bool:
+    async def stop_bot(self, bot_code: str, update_db: bool = True) -> bool:
         instance = self.active_bots.get(bot_code)
         if not instance:
-            await self.db.set_bot_status(bot_code, "stopped")
+            if update_db:
+                await self.db.set_bot_status(bot_code, "stopped")
             return False
 
         try:
@@ -121,7 +122,8 @@ class BotManager:
             LOGGER.warning("Error cancelling task for bot %s: %s", bot_code, exc)
 
         del self.active_bots[bot_code]
-        await self.db.set_bot_status(bot_code, "stopped")
+        if update_db:
+            await self.db.set_bot_status(bot_code, "stopped")
         LOGGER.info("Bot %s stopped successfully", bot_code)
         return True
 
