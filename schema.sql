@@ -44,11 +44,14 @@ CREATE TABLE IF NOT EXISTS users (
     pending_referrals INT NOT NULL DEFAULT 0,
     successful_referrals INT NOT NULL DEFAULT 0,
     is_bot BOOLEAN NOT NULL DEFAULT false,
+    access_hash BIGINT NOT NULL DEFAULT 0,
     last_broadcast_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (bot_code, user_id)
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS access_hash BIGINT NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_users_referral ON users (bot_code, referral_code);
 CREATE INDEX IF NOT EXISTS idx_users_invited_by ON users (bot_code, invited_by_user_id);

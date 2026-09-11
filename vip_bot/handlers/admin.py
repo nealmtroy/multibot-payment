@@ -1,3 +1,4 @@
+from pathlib import Path
 import asyncio
 import io
 import html
@@ -700,16 +701,32 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
         if action == "set_broadcast_msg":
             bot_code = state["data"]["bot_code"]
             text_content = event.raw_text or ""
-            media_file_id = getattr(getattr(event, "file", None), "id", "") or ""
-            media_type = getattr(getattr(event, "file", None), "mime_type", "") or ""
-            if not text_content and not media_file_id:
+            media_path_str = ""
+            media_type = ""
+            if getattr(event, "media", None):
+                broadcast_dir = Path("data/broadcast_media")
+                broadcast_dir.mkdir(parents=True, exist_ok=True)
+                for old_f in broadcast_dir.glob(f"bc_{bot_code}.*"):
+                    try:
+                        old_f.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                try:
+                    downloaded = await event.download_media(file=str(broadcast_dir / f"bc_{bot_code}"))
+                    if downloaded:
+                        media_path_str = Path(downloaded).as_posix()
+                        media_type = getattr(getattr(event, "file", None), "mime_type", "") or ""
+                except Exception as down_exc:
+                    LOGGER.warning("Failed to download broadcast media: %s", down_exc)
+
+            if not text_content and not media_path_str:
                 await event.respond("Pesan harus memiliki teks atau media. Silakan kirimkan kembali:", buttons=cancel_keyboard())
                 return
 
             admin_states.pop(event.sender_id, None)
             entities_json = entities_to_json(event.entities or [])
             await db.set_broadcast_message(
-                text_content, media_file_id, media_type, entities_json, bot_code=bot_code
+                text_content, media_path_str, media_type, entities_json, bot_code=bot_code
             )
             await event.respond(
                 f"✅ <b>Pesan broadcast untuk bot <code>{html.escape(bot_code)}</code> berhasil disimpan!</b>\n\n"
@@ -1013,8 +1030,24 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                 await event.answer("Belum ada pesan broadcast untuk bot ini.", alert=True)
                 return
             target_client = bot_manager.get_client(bot_code) if bot_manager else client
+            if not target_client or not getattr(target_client, "is_connected", lambda: False)():
+                await event.answer(f"Bot [{bot_code}] sedang tidak aktif atau terputus.", alert=True)
+                return
+
             admin_ids = list(config.admin_user_ids) or [event.sender_id]
-            totals = await send_broadcast_batch(target_client, db, msg, admin_ids, config.qris_create_concurrency, bot_code=bot_code)
+            admin_targets = [{"user_id": uid, "access_hash": 0} for uid in admin_ids]
+
+            media_handle = None
+            media_file = msg.get("media_telegram_file_id") or ""
+            if media_file and Path(media_file).is_file():
+                try:
+                    media_handle = await target_client.upload_file(media_file)
+                except Exception as up_exc:
+                    LOGGER.warning("Could not pre-upload test broadcast media: %s", up_exc)
+
+            totals = await send_broadcast_batch(
+                target_client, db, msg, admin_targets, concurrency=1, bot_code=bot_code, uploaded_media=media_handle, is_test=True
+            )
             await event.edit(
                 f"✅ <b>Test Broadcast Selesai [{html.escape(bot_code)}]</b>\n"
                 f"• Terkirim ke Admin: <code>{totals['sent']}/{len(admin_ids)}</code>\n"

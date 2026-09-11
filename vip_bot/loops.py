@@ -1,7 +1,9 @@
+from pathlib import Path
 import asyncio
 import datetime as dt
 import html
 import logging
+from telethon.errors import FloodWaitError
 from vip_bot.config import WIB, BROADCAST_DISABLED_VALUES
 from vip_bot.helpers import (
     check_payment_sync,
@@ -331,25 +333,157 @@ async def polling_loop(bot_manager_or_client, config, db):
         await asyncio.sleep(config.poll_interval_seconds)
 
 
-async def send_broadcast_batch(client, db, broadcast_message, target_ids, concurrency=5, bot_code="default"):
-    semaphore = asyncio.Semaphore(concurrency)
-    totals = {"sent": 0, "blocked": 0, "deactivated": 0, "error": 0}
+async def send_broadcast_batch(
+    client,
+    db,
+    broadcast_message,
+    targets,
+    concurrency=3,
+    bot_code="default",
+    uploaded_media=None,
+    is_test=False,
+):
+    semaphore = asyncio.Semaphore(max(1, min(concurrency, 5)))
+    totals = {"sent": 0, "blocked": 0, "deactivated": 0, "unreachable": 0, "error": 0}
+    pause_event = asyncio.Event()
+    pause_event.set()
+    fatal_flood = False
 
-    async def _send(uid):
+    async def _send(target):
+        nonlocal fatal_flood
+        if fatal_flood:
+            return
+
+        uid = target["user_id"] if isinstance(target, dict) else int(target)
+        await pause_event.wait()
+
         async with semaphore:
-            status = await send_broadcast_to_user(client, db, broadcast_message, uid)
+            await pause_event.wait()
+            status = "error"
+            for attempt in range(2):
+                try:
+                    status = await send_broadcast_to_user(
+                        client, db, broadcast_message, target, uploaded_media=uploaded_media
+                    )
+                    break
+                except FloodWaitError as exc:
+                    wait_sec = max(1, int(exc.seconds))
+                    if wait_sec > 300:
+                        LOGGER.error("Fatal FloodWait of %ds detected on bot [%s]. Halting batch.", wait_sec, bot_code)
+                        fatal_flood = True
+                        status = "error"
+                        break
+                    LOGGER.warning("FloodWait of %ds on bot [%s]. Pausing all broadcast workers...", wait_sec, bot_code)
+                    pause_event.clear()
+                    await asyncio.sleep(wait_sec + 1)
+                    pause_event.set()
+                    status = "error"
+                except Exception as exc:
+                    LOGGER.warning("Error broadcasting to user %s: %s", uid, exc)
+                    status = "error"
+                    break
+
             if status in totals:
                 totals[status] += 1
             else:
                 totals["error"] += 1
-            if status == "sent":
+
+            if status == "sent" and not is_test:
                 try:
                     await db.mark_user_broadcasted(uid, bot_code=bot_code)
                 except Exception:
                     pass
 
-    await asyncio.gather(*[_send(uid) for uid in target_ids])
+            # Small pacing to stay well within Telegram limits (~20-25 msg/s max)
+            await asyncio.sleep(0.05)
+
+    await asyncio.gather(*[_send(t) for t in targets])
+    if fatal_flood:
+        totals["fatal_flood"] = True
     return totals
+
+
+active_broadcast_tasks: set[str] = set()
+
+
+async def _process_single_bot_broadcast(bot_manager_or_client, config, db, b_code, b_time, today_str, now_wib):
+    try:
+        client = resolve_client(bot_manager_or_client, b_code)
+        if not client or not getattr(client, "is_connected", lambda: False)():
+            LOGGER.warning("Skipping broadcast for bot [%s]: client is not connected.", b_code)
+            return
+
+        msg = await db.get_active_broadcast_message(bot_code=b_code)
+        if not msg:
+            LOGGER.info("Broadcast time reached for [%s] (%s WIB) but no active message", b_code, b_time)
+            await db.set_last_broadcast_date(today_str, bot_code=b_code)
+            return
+
+        # Pre-upload media ONCE if media file exists on disk
+        media_handle = None
+        media_file = msg.get("media_telegram_file_id") or ""
+        if media_file and Path(media_file).is_file():
+            try:
+                LOGGER.info("Uploading broadcast media for [%s] (%s)...", b_code, media_file)
+                media_handle = await client.upload_file(media_file)
+                LOGGER.info("Broadcast media uploaded successfully for [%s].", b_code)
+            except Exception as up_exc:
+                LOGGER.error("Failed to upload broadcast media for [%s]: %s", b_code, up_exc)
+
+        # Pagination loop: send in chunks of 200 until all targets for today are reached
+        today_start_iso = now_wib.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        grand_totals = {"sent": 0, "blocked": 0, "deactivated": 0, "unreachable": 0, "error": 0}
+        concurrency = min(config.qris_create_concurrency, 3)
+
+        LOGGER.info("Starting broadcast pagination loop for bot [%s]...", b_code)
+        while True:
+            batch_targets = await db.get_broadcast_targets(
+                bot_code=b_code, before_iso=today_start_iso, limit=200
+            )
+            if not batch_targets:
+                break
+
+            totals = await send_broadcast_batch(
+                client,
+                db,
+                msg,
+                batch_targets,
+                concurrency=concurrency,
+                bot_code=b_code,
+                uploaded_media=media_handle,
+                is_test=False,
+            )
+            for k in grand_totals:
+                grand_totals[k] += totals.get(k, 0)
+
+            if totals.get("fatal_flood"):
+                LOGGER.error("Halting remaining broadcast for bot [%s] due to fatal FloodWait.", b_code)
+                break
+
+            await asyncio.sleep(1)
+
+        LOGGER.info("Broadcast for bot [%s] completed: %s", b_code, grand_totals)
+        total_targets = sum(grand_totals.values())
+        if total_targets > 0:
+            await send_log(
+                client,
+                config,
+                db,
+                (
+                    f"📢 <b>Broadcast Harian Selesai [{html.escape(b_code)}]</b>\n"
+                    f"• Waktu: <code>{html.escape(b_time)} WIB</code>\n"
+                    f"• Terkirim: <b>{grand_totals.get('sent', 0)}</b>\n"
+                    f"• Diblokir: <b>{grand_totals.get('blocked', 0)}</b>\n"
+                    f"• Akun Dihapus: <b>{grand_totals.get('deactivated', 0)}</b>\n"
+                    f"• Tidak Terjangkau: <b>{grand_totals.get('unreachable', 0)}</b>\n"
+                    f"• Gagal: <b>{grand_totals.get('error', 0)}</b>"
+                ),
+            )
+        await db.set_last_broadcast_date(today_str, bot_code=b_code)
+    except Exception as exc:
+        LOGGER.exception("Error processing broadcast for bot [%s]: %s", b_code, exc)
+    finally:
+        active_broadcast_tasks.discard(b_code)
 
 
 async def broadcast_loop(bot_manager_or_client, config, db):
@@ -372,41 +506,22 @@ async def broadcast_loop(bot_manager_or_client, config, db):
                 pass
 
             for b_code in sorted(known_bot_codes):
+                if b_code in active_broadcast_tasks:
+                    continue
                 try:
                     b_time = await db.get_broadcast_time(bot_code=b_code)
                     if not b_time or b_time in BROADCAST_DISABLED_VALUES:
                         continue
                     last_date = await db.get_last_broadcast_date(bot_code=b_code)
                     if current_time == b_time and last_date != today_str:
-                        msg = await db.get_active_broadcast_message(bot_code=b_code)
-                        if not msg:
-                            LOGGER.info("Broadcast time reached for [%s] (%s WIB) but no active message", b_code, b_time)
-                            continue
-
-                        client = resolve_client(bot_manager_or_client, b_code)
-                        targets = [t["user_id"] for t in (await db.get_broadcast_targets(bot_code=b_code, limit=1000))]
-                        if targets:
-                            LOGGER.info("Dispatching broadcast for bot [%s] to %d users...", b_code, len(targets))
-                            totals = await send_broadcast_batch(
-                                client, db, msg, targets, config.qris_create_concurrency, bot_code=b_code
+                        active_broadcast_tasks.add(b_code)
+                        asyncio.create_task(
+                            _process_single_bot_broadcast(
+                                bot_manager_or_client, config, db, b_code, b_time, today_str, now_wib
                             )
-                            LOGGER.info("Broadcast for bot [%s] completed: %s", b_code, totals)
-                            await send_log(
-                                client,
-                                config,
-                                db,
-                                (
-                                    f"📢 <b>Broadcast Harian Selesai [{html.escape(b_code)}]</b>\n"
-                                    f"• Waktu: <code>{html.escape(b_time)} WIB</code>\n"
-                                    f"• Terkirim: <b>{totals.get('sent', 0)}</b>\n"
-                                    f"• Diblokir: <b>{totals.get('blocked', 0)}</b>\n"
-                                    f"• Akun Dihapus: <b>{totals.get('deactivated', 0)}</b>\n"
-                                    f"• Gagal: <b>{totals.get('error', 0)}</b>"
-                                ),
-                            )
-                        await db.set_last_broadcast_date(today_str, bot_code=b_code)
+                        )
                 except Exception as sub_exc:
-                    LOGGER.exception("Error processing broadcast for bot [%s]: %s", b_code, sub_exc)
+                    LOGGER.exception("Error evaluating broadcast for bot [%s]: %s", b_code, sub_exc)
         except asyncio.CancelledError:
             break
         except Exception as exc:

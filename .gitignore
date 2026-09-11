@@ -13,4 +13,5 @@ docs/
 
 sessions/
 .pytest_cache/
+backups/
 

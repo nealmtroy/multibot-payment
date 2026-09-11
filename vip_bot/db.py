@@ -40,6 +40,10 @@ class Database:
         sql = p.read_text(encoding="utf-8")
         async with self.pool.acquire() as conn:
             await conn.execute(sql)
+            try:
+                await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS access_hash BIGINT NOT NULL DEFAULT 0;")
+            except Exception as e:
+                LOGGER.warning("Could not run access_hash migration: %s", e)
         LOGGER.info("PostgreSQL schema initialized successfully.")
 
     # -------------------------------------------------------------------------
@@ -144,20 +148,22 @@ class Database:
         name = display_name(user)
         username = user.username or ""
         is_bot = bool(getattr(user, "bot", False))
+        access_hash = int(getattr(user, "access_hash", 0) or 0)
 
         query = """
-        INSERT INTO users (bot_code, user_id, username, full_name, referral_code, is_bot, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, now())
+        INSERT INTO users (bot_code, user_id, username, full_name, referral_code, is_bot, access_hash, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, now())
         ON CONFLICT (bot_code, user_id) DO UPDATE SET
             username = EXCLUDED.username,
             full_name = EXCLUDED.full_name,
             referral_code = EXCLUDED.referral_code,
             is_bot = EXCLUDED.is_bot,
+            access_hash = CASE WHEN EXCLUDED.access_hash <> 0 THEN EXCLUDED.access_hash ELSE users.access_hash END,
             updated_at = now()
         RETURNING *;
         """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, bot_code, user.id, username, name, code, is_bot)
+            row = await conn.fetchrow(query, bot_code, user.id, username, name, code, is_bot, access_hash)
             return record_to_dict(row)
 
     async def get_user(self, user_id: int, bot_code: str = "default") -> dict | None:
@@ -590,7 +596,7 @@ class Database:
             if before_dt:
                 rows = await conn.fetch(
                     """
-                    SELECT user_id FROM users
+                    SELECT user_id, access_hash FROM users
                     WHERE bot_code = $1 AND is_bot = false AND (last_broadcast_at IS NULL OR last_broadcast_at < $2)
                     ORDER BY last_broadcast_at ASC NULLS FIRST LIMIT $3
                     """,
@@ -601,7 +607,7 @@ class Database:
             else:
                 rows = await conn.fetch(
                     """
-                    SELECT user_id FROM users
+                    SELECT user_id, access_hash FROM users
                     WHERE bot_code = $1 AND is_bot = false
                     ORDER BY last_broadcast_at ASC NULLS FIRST LIMIT $2
                     """,

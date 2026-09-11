@@ -1,3 +1,4 @@
+from pathlib import Path
 import hashlib
 import asyncio
 import datetime as dt
@@ -11,26 +12,8 @@ import secrets
 import string
 import time
 import requests
-from telethon import Button, errors, functions
+from telethon import Button, errors, functions, types
 from telethon.errors import FloodWaitError
-from telethon.tl.types import (
-    MessageEntityBlockquote,
-    MessageEntityBold,
-    MessageEntityBotCommand,
-    MessageEntityCode,
-    MessageEntityEmail,
-    MessageEntityHashtag,
-    MessageEntityItalic,
-    MessageEntityMention,
-    MessageEntityMentionName,
-    MessageEntityPhone,
-    MessageEntityPre,
-    MessageEntitySpoiler,
-    MessageEntityStrike,
-    MessageEntityTextUrl,
-    MessageEntityUnderline,
-    MessageEntityUrl,
-)
 
 from sociabuzz_client import (
     SociaBuzzError,
@@ -51,23 +34,11 @@ from vip_bot.config import (
 
 LOGGER = logging.getLogger("telegram_vip_bot.helpers")
 
+# Dynamically map all MessageEntity and InputMessageEntity classes from telethon
 ENTITY_NAME_MAP = {
-    "MessageEntityBlockquote": MessageEntityBlockquote,
-    "MessageEntityBold": MessageEntityBold,
-    "MessageEntityBotCommand": MessageEntityBotCommand,
-    "MessageEntityCode": MessageEntityCode,
-    "MessageEntityEmail": MessageEntityEmail,
-    "MessageEntityHashtag": MessageEntityHashtag,
-    "MessageEntityItalic": MessageEntityItalic,
-    "MessageEntityMention": MessageEntityMention,
-    "MessageEntityMentionName": MessageEntityMentionName,
-    "MessageEntityPhone": MessageEntityPhone,
-    "MessageEntityPre": MessageEntityPre,
-    "MessageEntitySpoiler": MessageEntitySpoiler,
-    "MessageEntityStrike": MessageEntityStrike,
-    "MessageEntityTextUrl": MessageEntityTextUrl,
-    "MessageEntityUnderline": MessageEntityUnderline,
-    "MessageEntityUrl": MessageEntityUrl,
+    name: getattr(types, name)
+    for name in dir(types)
+    if name.startswith("MessageEntity") or name.startswith("InputMessageEntity")
 }
 
 
@@ -266,6 +237,15 @@ def is_user_blocked_error(exc):
 def is_user_deactivated_error(exc):
     deactivated_error = getattr(errors, "InputUserDeactivatedError", None)
     return (deactivated_error is not None and isinstance(exc, deactivated_error)) or "user was deleted" in str(exc).lower()
+
+
+def is_user_unreachable_error(exc):
+    msg = str(exc).lower()
+    return (
+        (isinstance(exc, ValueError) and "could not find the input entity" in msg)
+        or "user_id_invalid" in msg
+        or "peer_id_invalid" in msg
+    )
 
 
 def is_sociabuzz_timeout(exc):
@@ -487,38 +467,51 @@ async def safe_send_user(client, config, db, user_id, text, **kwargs):
         return status
 
 
-async def send_broadcast_to_user(client, db, broadcast_message, user_id):
+async def send_broadcast_to_user(client, db, broadcast_message, target, uploaded_media=None):
+    if isinstance(target, dict):
+        user_id = int(target.get("user_id") or 0)
+        access_hash = int(target.get("access_hash") or 0)
+        peer = types.InputPeerUser(user_id, access_hash) if access_hash else user_id
+    else:
+        user_id = int(target)
+        peer = user_id
+
     async def send_once():
         text = broadcast_message.get("message_text") or ""
         media_file_id = broadcast_message.get("media_telegram_file_id") or ""
         entities = json_to_entities(broadcast_message.get("entities_json") or "[]")
         entity_kwargs = {"formatting_entities": entities} if entities else {}
-        if media_file_id:
-            await client.send_file(user_id, media_file_id, caption=text or None, parse_mode=None, **entity_kwargs)
+
+        media_to_send = uploaded_media
+        if not media_to_send and media_file_id:
+            media_path = Path(media_file_id)
+            if media_path.is_file():
+                media_to_send = str(media_path)
+            elif media_file_id:
+                media_to_send = media_file_id
+
+        if media_to_send:
+            await client.send_file(peer, media_to_send, caption=text or None, parse_mode=None, **entity_kwargs)
         elif text:
-            await client.send_message(user_id, text, parse_mode=None, **entity_kwargs)
+            await client.send_message(peer, text, parse_mode=None, **entity_kwargs)
         else:
             return "empty"
         return "sent"
 
-    error = None
     try:
         return await send_once()
-    except FloodWaitError as exc:
-        LOGGER.warning("FloodWait %ss while broadcasting to user %s", exc.seconds, user_id)
-        await asyncio.sleep(max(1, int(exc.seconds)))
-        try:
-            return await send_once()
-        except Exception as retry_exc:
-            error = retry_exc
+    except FloodWaitError:
+        # Re-raise so caller (send_broadcast_batch) can pause all workers globally
+        raise
     except Exception as exc:
-        error = exc
-
-    if is_user_blocked_error(error):
-        return "blocked"
-    if is_user_deactivated_error(error):
-        return "deactivated"
-    return "error"
+        if is_user_blocked_error(exc):
+            return "blocked"
+        if is_user_deactivated_error(exc):
+            return "deactivated"
+        if is_user_unreachable_error(exc):
+            return "unreachable"
+        LOGGER.warning("Broadcast to user %s failed: %s", user_id, exc)
+        return "error"
 
 
 async def delete_qris_message(client, payment):
