@@ -189,7 +189,8 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
 
 async def send_package_menu(event, config, db, message=None, bot_code="default"):
     packages = await db.list_packages(bot_code=bot_code)
-    buttons = package_buttons(config, packages, bot_code=bot_code)
+    cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
+    buttons = package_buttons(config, packages, bot_code=bot_code, columns=cols)
     text = "Silakan pilih paket VIP yang ingin kamu beli:"
     if message is None:
         await event.respond(text, buttons=buttons)

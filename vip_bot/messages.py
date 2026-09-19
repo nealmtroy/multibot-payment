@@ -130,11 +130,33 @@ def default_package(config, bot_code="default", vip_chat_id=None):
     }
 
 
+def telethon_button_style(style_str):
+    if not style_str:
+        return None
+    s = str(style_str).lower().strip()
+    if s in ("primary", "danger", "success"):
+        return s
+    return None
+
+
+def button_style_badge(style_str):
+    s = str(style_str or "").lower().strip()
+    if s == "primary":
+        return "🔵 Primary (Biru)"
+    if s == "danger":
+        return "🔴 Danger (Merah)"
+    if s == "success":
+        return "🟢 Success (Hijau)"
+    return "⚪ Standar"
+
+
 def package_label(package):
+    if package.get("button_label"):
+        return package["button_label"]
     return f"{package['name']} - {format_button_amount(package['amount'])}"
 
 
-def package_buttons(config, store_or_packages, bot_code="default", vip_chat_id=None):
+def package_buttons(config, store_or_packages, bot_code="default", vip_chat_id=None, columns=1):
     if isinstance(store_or_packages, list):
         packages = store_or_packages
     elif hasattr(store_or_packages, "list_packages"):
@@ -146,23 +168,78 @@ def package_buttons(config, store_or_packages, bot_code="default", vip_chat_id=N
 
     if not packages:
         packages = [default_package(config, bot_code=bot_code, vip_chat_id=vip_chat_id)]
-    buttons = []
-    for package in packages:
-        buttons.append([Button.inline(package_label(package), data=f"pkg:{package['code']}")])
-    return buttons
+
+    # Check if explicit row_index is used by any package
+    has_explicit_rows = any(int(p.get("row_index") or 0) > 0 for p in packages)
+    if has_explicit_rows:
+        from collections import defaultdict
+        row_map = defaultdict(list)
+        for p in packages:
+            r = int(p.get("row_index") or 0)
+            if r == 0:
+                r = 9999
+            btn = Button.inline(
+                package_label(p),
+                data=f"pkg:{p['code']}",
+                style=telethon_button_style(p.get("button_style")),
+            )
+            row_map[r].append(btn)
+        return [row_map[r] for r in sorted(row_map.keys())]
+
+    cols = max(1, min(int(columns or 1), 3))
+    raw_buttons = [
+        Button.inline(
+            package_label(p),
+            data=f"pkg:{p['code']}",
+            style=telethon_button_style(p.get("button_style")),
+        )
+        for p in packages
+    ]
+
+    rows = []
+    for i in range(0, len(raw_buttons), cols):
+        rows.append(raw_buttons[i : i + cols])
+    return rows
 
 
-def package_list_text(packages, bot_code=None):
-    title = f"📦 <b>Daftar Group VIP ({html.escape(bot_code)}):</b>\n" if bot_code else "📦 <b>Daftar Group VIP:</b>\n"
+def package_detail_card(pkg):
+    status = "🟢 Aktif" if pkg.get("active", True) else "🔴 Nonaktif"
+    style_badge = button_style_badge(pkg.get("button_style"))
+    custom_lbl = f"<code>{html.escape(pkg['button_label'])}</code>" if pkg.get("button_label") else "<i>(Default: Nama - Harga)</i>"
+    order_num = pkg.get("sort_order", 100)
+    expire_h = pkg.get("invite_expire_hours", 0)
+    expire_text = f"{expire_h} Jam" if expire_h > 0 else "Permanen (0 jam)"
+
+    return (
+        f"📦 <b>Detail & Konfigurasi Paket VIP</b>\n"
+        f"• Bot: <code>{html.escape(pkg.get('bot_code', 'default'))}</code>\n"
+        f"• Kode Paket: <code>{html.escape(pkg['code'])}</code>\n\n"
+        f"📝 <b>Nama Paket</b>: <b>{html.escape(pkg['name'])}</b>\n"
+        f"💰 <b>Harga</b>: <b>{format_rupiah(pkg['amount'])}</b>\n"
+        f"🆔 <b>VIP Chat ID</b>: <code>{pkg['vip_chat_id']}</code>\n"
+        f"⏳ <b>Durasi Link Expire</b>: <b>{expire_text}</b>\n"
+        f"🎨 <b>Warna Tombol</b>: {style_badge}\n"
+        f"🏷️ <b>Label Tombol</b>: {custom_lbl}\n"
+        f"↕️ <b>Nilai Urutan (Sort Order)</b>: <code>{order_num}</code>\n"
+        f"📌 <b>Status</b>: {status}\n\n"
+        f"<i>Pilih data yang ingin diubah melalui tombol di bawah:</i>"
+    )
+
+
+def package_list_text(packages, bot_code=None, columns=1):
+    title = f"📦 <b>Daftar Paket VIP ({html.escape(bot_code)}):</b>\n" if bot_code else "📦 <b>Daftar Paket VIP:</b>\n"
     if not packages:
         return title + "<i>Belum ada paket/group yang didaftarkan.</i>"
     lines = [title]
-    for pkg in packages:
+    for idx, pkg in enumerate(packages, 1):
         status = "🟢 Aktif" if pkg.get("active", True) else "🔴 Nonaktif"
+        style_badge = button_style_badge(pkg.get("button_style"))
+        lbl = f" [Label: <code>{html.escape(pkg['button_label'])}</code>]" if pkg.get("button_label") else ""
         lines.append(
-            f"• <code>{html.escape(pkg['code'])}</code> ({html.escape(pkg.get('bot_code', 'default'))}) - "
+            f"{idx}. <code>{html.escape(pkg['code'])}</code> ({html.escape(pkg.get('bot_code', 'default'))}) - "
             f"<b>{html.escape(pkg['name'])}</b> | <code>{pkg['vip_chat_id']}</code> | "
-            f"<b>{format_button_amount(pkg['amount'])}</b> [{status}]"
+            f"<b>{format_button_amount(pkg['amount'])}</b> [{status}]\n"
+            f"   • Tombol: {style_badge}{lbl} | Urutan: <code>{pkg.get('sort_order', 100)}</code>"
         )
     return "\n".join(lines)
 
@@ -226,8 +303,9 @@ def admin_bot_menu_keyboard():
 
 def admin_package_menu_keyboard():
     return [
-        [Button.text("➕ Tambah Paket VIP", resize=True), Button.text("📑 Daftar Paket VIP")],
-        [Button.text("🗑️ Hapus Paket VIP"), Button.text("🔙 Menu Utama")],
+        [Button.text("➕ Tambah Paket VIP", resize=True), Button.text("✏️ Edit Paket VIP")],
+        [Button.text("📑 Daftar Paket VIP"), Button.text("🗑️ Hapus Paket VIP")],
+        [Button.text("🔙 Menu Utama")],
     ]
 
 

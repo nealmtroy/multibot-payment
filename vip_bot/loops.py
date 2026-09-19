@@ -244,6 +244,7 @@ async def poll_once(bot_manager_or_client, config, db, payment):
         elif status in {"failed_or_expired", "unknown"}:
             await db.mark_payment_failed(payment["inv_id"], "failed_or_expired", "Expired or failed on gateway")
             packages = await db.list_packages(bot_code=bot_code)
+            cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
             await delete_qris_message(client, payment)
             await safe_send_user(
                 client,
@@ -252,7 +253,7 @@ async def poll_once(bot_manager_or_client, config, db, payment):
                 payment["user_id"],
                 invalid_payment_message(),
                 parse_mode="html",
-                buttons=package_buttons(config, packages, bot_code=bot_code),
+                buttons=package_buttons(config, packages, bot_code=bot_code, columns=cols),
             )
             await send_log(
                 client,
@@ -311,6 +312,7 @@ async def expire_pending_payment(client, config, db, payment, title="Payment exp
     is_custom = payment.get("package_code") == "CUSTOM" or not payment.get("vip_chat_id")
     if not is_custom:
         packages = await db.list_packages(bot_code=bot_code)
+        cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
         await safe_send_user(
             client,
             config,
@@ -318,7 +320,7 @@ async def expire_pending_payment(client, config, db, payment, title="Payment exp
             payment["user_id"],
             timeout_payment_message(),
             parse_mode="html",
-            buttons=package_buttons(config, packages, bot_code=bot_code),
+            buttons=package_buttons(config, packages, bot_code=bot_code, columns=cols),
         )
     await send_log(
         client,

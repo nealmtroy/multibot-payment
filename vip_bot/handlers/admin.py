@@ -29,6 +29,10 @@ from vip_bot.messages import (
     admin_command_list_text,
     custom_qris_caption,
     package_list_text,
+    package_detail_card,
+    button_style_badge,
+    package_buttons,
+    telethon_button_style,
     bot_list_text,
     admin_main_menu_keyboard,
     admin_bot_menu_keyboard,
@@ -80,6 +84,33 @@ def parse_package_add_args(raw):
     amount_value = int(digits)
     chat_id_value = int(chat_id)
     return bot_code, code, name, chat_id_value, amount_value
+
+
+def admin_package_edit_keyboard(bot_code, pkg):
+    code = pkg["code"]
+    active_btn_text = "🔴 Nonaktifkan" if pkg.get("active", True) else "🟢 Aktifkan"
+    return [
+        [
+            Button.inline("📝 Ubah Nama", data=f"adm_pkgedit_field:{bot_code}:{code}:name"),
+            Button.inline("💰 Ubah Harga", data=f"adm_pkgedit_field:{bot_code}:{code}:amount"),
+        ],
+        [
+            Button.inline("🆔 Ubah Chat ID", data=f"adm_pkgedit_field:{bot_code}:{code}:chat_id"),
+            Button.inline("⏳ Ubah Expire Link", data=f"adm_pkgedit_field:{bot_code}:{code}:expire"),
+        ],
+        [
+            Button.inline("🎨 Ubah Warna", data=f"adm_pkgstyle_menu:{bot_code}:{code}"),
+            Button.inline("🏷️ Ubah Label Tombol", data=f"adm_pkgedit_field:{bot_code}:{code}:label"),
+        ],
+        [
+            Button.inline("🔢 Set Angka Urut", data=f"adm_pkgedit_field:{bot_code}:{code}:order"),
+            Button.inline(active_btn_text, data=f"adm_pkgtoggle:{bot_code}:{code}"),
+        ],
+        [
+            Button.inline("🗑️ Hapus Paket", data=f"adm_delpkg:{bot_code}:{code}"),
+            Button.inline(f"🔙 Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}"),
+        ],
+    ]
 
 
 def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_manager=None):
@@ -465,6 +496,7 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
     # -------------------------------------------------------------------------
     @client.on(events.NewMessage(func=lambda e: is_admin(config, e.sender_id) and e.raw_text in (
         "➕ Tambah Paket VIP",
+        "✏️ Edit Paket VIP",
         "📑 Daftar Paket VIP",
         "🗑️ Hapus Paket VIP",
     )))
@@ -493,6 +525,27 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                     for b in bots
                 ]
                 await event.respond("Pilih bot payment untuk melihat dan mengelola paket VIP:", buttons=buttons)
+            return
+
+        if text == "✏️ Edit Paket VIP":
+            if len(bots) == 1:
+                bot_code = bots[0]["bot_code"]
+                pkgs = await db.list_all_packages(bot_code=bot_code)
+                if not pkgs:
+                    await event.respond(f"Belum ada paket VIP untuk bot [{bot_code}].")
+                    return
+                buttons = [
+                    [Button.inline(f"✏️ {p['code']}: {p['name']} - {format_button_amount(p['amount'])}", data=f"adm_pkgedit_view:{bot_code}:{p['code']}")]
+                    for p in pkgs
+                ]
+                buttons.append([Button.inline(f"🔙 Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")])
+                await event.respond(f"Pilih paket VIP bot <b>[{bot_code}]</b> yang ingin diedit:", parse_mode="html", buttons=buttons)
+            else:
+                buttons = [
+                    [Button.inline(f"🤖 {b['bot_code']}", data=f"adm_pkgedit_pick:{b['bot_code']}")]
+                    for b in bots
+                ]
+                await event.respond("Pilih bot payment yang paketnya ingin diedit:", buttons=buttons)
             return
 
         if text == "➕ Tambah Paket VIP":
@@ -813,6 +866,85 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                 return
 
         # ---------------------------------------------------------------------
+        # Wizard: Edit Package Fields
+        # ---------------------------------------------------------------------
+        if action == "edit_package":
+            field = state.get("field")
+            bot_code = state["data"]["bot_code"]
+            code = state["data"]["code"]
+
+            try:
+                if field == "name":
+                    if not raw_text:
+                        await event.respond("Nama tidak boleh kosong. Masukkan nama paket:", buttons=cancel_keyboard())
+                        return
+                    await db.update_package_field(bot_code, code, "name", raw_text)
+                    admin_states.pop(event.sender_id, None)
+                    await event.respond(f"✅ Nama paket <code>{html.escape(code)}</code> berhasil diubah menjadi: <b>{html.escape(raw_text)}</b>", parse_mode="html")
+
+                elif field == "amount":
+                    digits = "".join(ch for ch in raw_text if ch.isdigit())
+                    if not digits:
+                        await event.respond("Harga harus angka. Masukkan harga paket:", buttons=cancel_keyboard())
+                        return
+                    amount = int(digits)
+                    await db.update_package_field(bot_code, code, "amount", amount)
+                    admin_states.pop(event.sender_id, None)
+                    await event.respond(f"✅ Harga paket <code>{html.escape(code)}</code> berhasil diubah menjadi: <b>{format_rupiah(amount)}</b>", parse_mode="html")
+
+                elif field == "chat_id":
+                    try:
+                        cid = int(raw_text)
+                    except ValueError:
+                        await event.respond("Chat ID harus angka (contoh: <code>-1001234567890</code>):", parse_mode="html", buttons=cancel_keyboard())
+                        return
+                    await db.update_package_field(bot_code, code, "vip_chat_id", cid)
+                    admin_states.pop(event.sender_id, None)
+                    await event.respond(f"✅ VIP Chat ID paket <code>{html.escape(code)}</code> berhasil diubah menjadi: <code>{cid}</code>", parse_mode="html")
+
+                elif field == "expire":
+                    digits = "".join(ch for ch in raw_text if ch.isdigit())
+                    if not digits:
+                        await event.respond("Durasi expire harus angka jam. Masukkan durasi jam (0 untuk permanen):", buttons=cancel_keyboard())
+                        return
+                    hours = int(digits)
+                    await db.update_package_field(bot_code, code, "invite_expire_hours", hours)
+                    admin_states.pop(event.sender_id, None)
+                    await event.respond(f"✅ Masa expire invite link paket <code>{html.escape(code)}</code> berhasil diubah menjadi: <b>{hours} jam</b>", parse_mode="html")
+
+                elif field == "label":
+                    new_label = "" if raw_text.lower() == "reset" else raw_text
+                    await db.update_package_field(bot_code, code, "button_label", new_label)
+                    admin_states.pop(event.sender_id, None)
+                    desc = "<i>Default (Nama - Harga)</i>" if not new_label else f"<code>{html.escape(new_label)}</code>"
+                    await event.respond(f"✅ Label tombol paket <code>{html.escape(code)}</code> berhasil diubah menjadi: {desc}", parse_mode="html")
+
+                elif field == "order":
+                    digits = "".join(ch for ch in raw_text if ch.isdigit())
+                    if not digits:
+                        await event.respond("Nomor urut harus angka. Masukkan nomor urutan:", buttons=cancel_keyboard())
+                        return
+                    order_val = int(digits)
+                    await db.update_package_field(bot_code, code, "sort_order", order_val)
+                    admin_states.pop(event.sender_id, None)
+                    await event.respond(f"✅ Nilai urutan paket <code>{html.escape(code)}</code> berhasil diubah menjadi: <code>{order_val}</code>", parse_mode="html")
+
+                # Send back the updated card with edit keyboard
+                pkg = await db.get_package(code, bot_code=bot_code)
+                if pkg:
+                    card = package_detail_card(pkg)
+                    buttons = admin_package_edit_keyboard(bot_code, pkg)
+                    await event.respond(card, parse_mode="html", buttons=buttons)
+                else:
+                    await event.respond("Pilih menu:", buttons=admin_main_menu_keyboard())
+
+            except Exception as exc:
+                LOGGER.exception("Error updating package field")
+                admin_states.pop(event.sender_id, None)
+                await event.respond(f"❌ Gagal mengubah paket: {html.escape(str(exc))}", buttons=admin_main_menu_keyboard())
+            return
+
+        # ---------------------------------------------------------------------
         # Wizard: Set Broadcast Message
         # ---------------------------------------------------------------------
         if action == "set_broadcast_msg":
@@ -989,12 +1121,13 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                 await send_log(client, config, db, f"<b>Bot Deleted</b>\nCode: <code>{html.escape(bot_code)}</code>\nAdmin: <code>{event.sender_id}</code>")
             return
 
-        # 5b. Select Bot Package Menu Dashboard
+        # 5b. Select Bot Package Menu Dashboard (Hub)
         if data.startswith("adm_pkgbot_menu:"):
             bot_code = data.split(":")[1]
             pkgs = await db.list_all_packages(bot_code=bot_code)
             bots = await bot_manager.list_all() if bot_manager else []
             bot_info = next((b for b in bots if b["bot_code"] == bot_code), None)
+            cols = await db.get_package_columns(bot_code=bot_code)
 
             status_badge = "🟢 Aktif / Online" if (bot_info and bot_info["status"] == "online") else "🔴 Nonaktif"
             bot_username = f"@{bot_info['bot_username']}" if (bot_info and bot_info.get("bot_username")) else "-"
@@ -1003,28 +1136,363 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
             lines = [
                 f"📦 <b>Kelola Paket VIP — [{html.escape(bot_code)}]</b>\n",
                 f"• Bot: <b>{html.escape(bot_name)}</b> ({html.escape(bot_username)})",
-                f"• Status: <b>{status_badge}</b>",
+                f"• Status Bot: <b>{status_badge}</b>",
+                f"• Tata Letak Keyboard: <b>{cols} Kolom (Grid)</b>",
                 f"• Total Paket VIP: <b>{len(pkgs)} paket</b>\n",
             ]
 
             if pkgs:
                 lines.append("<b>Daftar Paket Terdaftar:</b>")
-                for p in pkgs:
+                for idx, p in enumerate(pkgs, 1):
                     p_status = "🟢" if p.get("active", True) else "🔴"
-                    lines.append(f"{p_status} <code>{html.escape(p['code'])}</code>: {html.escape(p['name'])} — <b>{format_button_amount(p['amount'])}</b>")
+                    st_badge = button_style_badge(p.get("button_style"))
+                    lbl = f" | Label: <code>{html.escape(p['button_label'])}</code>" if p.get("button_label") else ""
+                    lines.append(
+                        f"{idx}. {p_status} <code>{html.escape(p['code'])}</code>: "
+                        f"<b>{html.escape(p['name'])}</b> — <b>{format_button_amount(p['amount'])}</b>\n"
+                        f"   ({st_badge}{lbl} | Urutan: <code>{p.get('sort_order', 100)}</code>)"
+                    )
             else:
                 lines.append("<i>Belum ada paket VIP untuk bot ini.</i>")
 
-            lines.append("\nPilih aksi di bawah:")
+            lines.append("\nPilih menu aksi di bawah:")
 
-            buttons = [
-                [Button.inline("➕ Tambah Paket VIP", data=f"adm_addpkg_bot:{bot_code}")],
-            ]
+            buttons = []
             if pkgs:
-                buttons.append([Button.inline("🗑️ Hapus Paket VIP", data=f"adm_delpkg_bot:{bot_code}")])
+                buttons.append([
+                    Button.inline("✏️ Edit Paket", data=f"adm_pkgedit_pick:{bot_code}"),
+                    Button.inline("➕ Tambah Paket", data=f"adm_addpkg_bot:{bot_code}"),
+                ])
+                buttons.append([
+                    Button.inline("↕️ Atur Urutan Posisi", data=f"adm_pkgreorder:{bot_code}"),
+                    Button.inline(f"📐 Kolom: {cols} Kolom", data=f"adm_pkgcols_menu:{bot_code}"),
+                ])
+                buttons.append([
+                    Button.inline("👁️ Preview Keyboard", data=f"adm_pkgpreview:{bot_code}"),
+                    Button.inline("🗑️ Hapus Paket", data=f"adm_delpkg_bot:{bot_code}"),
+                ])
+            else:
+                buttons.append([Button.inline("➕ Tambah Paket VIP", data=f"adm_addpkg_bot:{bot_code}")])
+
             buttons.append([Button.inline("🔙 Pilih Bot Lain", data="adm_pkg_choose_bot")])
 
             await event.edit("\n".join(lines), parse_mode="html", buttons=buttons)
+            return
+
+        # 5c. Edit Package - Pick Package to Edit
+        if data.startswith("adm_pkgedit_pick:"):
+            bot_code = data.split(":")[1]
+            pkgs = await db.list_all_packages(bot_code=bot_code)
+            if not pkgs:
+                await event.edit(
+                    f"Belum ada paket VIP untuk bot <b>[{html.escape(bot_code)}]</b>.",
+                    parse_mode="html",
+                    buttons=[[Button.inline(f"🔙 Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")]],
+                )
+                return
+
+            buttons = [
+                [Button.inline(f"✏️ {p['code']}: {p['name']} - {format_button_amount(p['amount'])}", data=f"adm_pkgedit_view:{bot_code}:{p['code']}")]
+                for p in pkgs
+            ]
+            buttons.append([Button.inline(f"🔙 Batal / Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")],)
+            await event.edit(
+                f"Pilih paket VIP bot <b>[{html.escape(bot_code)}]</b> yang ingin diedit:",
+                parse_mode="html",
+                buttons=buttons,
+            )
+            return
+
+        # 5d. Edit Package - View Detail & Options
+        if data.startswith("adm_pkgedit_view:"):
+            parts = data.split(":")
+            bot_code = parts[1]
+            code = parts[2]
+            pkg = await db.get_package(code, bot_code=bot_code)
+            if not pkg:
+                await event.answer("Paket tidak ditemukan.", alert=True)
+                return
+            card = package_detail_card(pkg)
+            buttons = admin_package_edit_keyboard(bot_code, pkg)
+            await event.edit(card, parse_mode="html", buttons=buttons)
+            return
+
+        # 5e. Edit Package - Field Text Input Prompt
+        if data.startswith("adm_pkgedit_field:"):
+            parts = data.split(":")
+            bot_code = parts[1]
+            code = parts[2]
+            field = parts[3]
+
+            admin_states[event.sender_id] = {
+                "action": "edit_package",
+                "field": field,
+                "data": {"bot_code": bot_code, "code": code},
+            }
+
+            prompts = {
+                "name": (
+                    f"📝 <b>Ubah Nama Paket VIP [{html.escape(code)}]</b>\n\n"
+                    f"Ketik nama baru paket/grup VIP:\nContoh: <code>Group VIP Premium 1 Bulan</code>"
+                ),
+                "amount": (
+                    f"💰 <b>Ubah Harga Paket VIP [{html.escape(code)}]</b>\n\n"
+                    f"Ketik nominal harga baru dalam Rupiah (angka saja):\nContoh: <code>50000</code>"
+                ),
+                "chat_id": (
+                    f"🆔 <b>Ubah VIP Chat ID [{html.escape(code)}]</b>\n\n"
+                    f"Ketik Chat ID Telegram group/channel baru (angka saja, diawali -100):\nContoh: <code>-100192837465</code>"
+                ),
+                "expire": (
+                    f"⏳ <b>Ubah Durasi Expire Invite Link [{html.escape(code)}]</b>\n\n"
+                    f"Ketik masa aktif invite link setelah pembeli membayar (dalam jam):\nContoh: <code>24</code> (ketik <code>0</code> untuk tanpa batas)"
+                ),
+                "label": (
+                    f"🏷️ <b>Ubah Label Tombol Inline [{html.escape(code)}]</b>\n\n"
+                    f"Ketik teks label tombol yang kamu inginkan (contoh: <code>MV 1</code>).\n\n"
+                    f"<i>Ketik <code>reset</code> jika ingin kembali menggunakan format otomatis (Nama - Harga).</i>"
+                ),
+                "order": (
+                    f"🔢 <b>Ubah Angka Urutan Posisi [{html.escape(code)}]</b>\n\n"
+                    f"Ketik angka nomor urutan paket (misal: <code>1</code>, <code>2</code>, <code>10</code>).\n"
+                    f"Angka lebih kecil akan tampil di urutan teratas/paling kiri."
+                ),
+            }
+
+            msg_text = prompts.get(field, "Ketik data baru:")
+            await event.edit(msg_text, parse_mode="html")
+            await event.respond("Ketik data baru atau klik Batal:", buttons=cancel_keyboard())
+            return
+
+        # 5f. Edit Package - Color Style Picker Menu
+        if data.startswith("adm_pkgstyle_menu:"):
+            parts = data.split(":")
+            bot_code = parts[1]
+            code = parts[2]
+            pkg = await db.get_package(code, bot_code=bot_code)
+            if not pkg:
+                await event.answer("Paket tidak ditemukan.", alert=True)
+                return
+
+            cur_style = button_style_badge(pkg.get("button_style"))
+            text = (
+                f"🎨 <b>Pilih Warna Tombol Inline Keyboard</b>\n\n"
+                f"• Bot: <code>{html.escape(bot_code)}</code>\n"
+                f"• Paket: <code>{html.escape(code)}</code> ({html.escape(pkg['name'])})\n"
+                f"• Warna Saat Ini: <b>{cur_style}</b>\n\n"
+                f"Pilih warna baru di bawah:"
+            )
+            buttons = [
+                [Button.inline("🔵 Primary (Biru)", data=f"adm_pkgstyle_set:{bot_code}:{code}:primary", style="primary")],
+                [Button.inline("🟢 Success (Hijau)", data=f"adm_pkgstyle_set:{bot_code}:{code}:success", style="success")],
+                [Button.inline("🔴 Danger (Merah)", data=f"adm_pkgstyle_set:{bot_code}:{code}:danger", style="danger")],
+                [Button.inline("⚪ Standar / Default (Abu-abu)", data=f"adm_pkgstyle_set:{bot_code}:{code}:default")],
+                [Button.inline("🔙 Batal / Kembali", data=f"adm_pkgedit_view:{bot_code}:{code}")],
+            ]
+            await event.edit(text, parse_mode="html", buttons=buttons)
+            return
+
+        # 5g. Edit Package - Set Color Style
+        if data.startswith("adm_pkgstyle_set:"):
+            parts = data.split(":")
+            bot_code = parts[1]
+            code = parts[2]
+            style = parts[3]
+            await db.update_package_field(bot_code, code, "button_style", style)
+            await event.answer(f"✅ Warna tombol diubah ke {style}!")
+            pkg = await db.get_package(code, bot_code=bot_code)
+            card = package_detail_card(pkg)
+            buttons = admin_package_edit_keyboard(bot_code, pkg)
+            await event.edit(card, parse_mode="html", buttons=buttons)
+            return
+
+        # 5h. Edit Package - Toggle Active/Inactive
+        if data.startswith("adm_pkgtoggle:"):
+            parts = data.split(":")
+            bot_code = parts[1]
+            code = parts[2]
+            pkg = await db.get_package(code, bot_code=bot_code)
+            if not pkg:
+                await event.answer("Paket tidak ditemukan.", alert=True)
+                return
+            new_active = not pkg.get("active", True)
+            await db.update_package_field(bot_code, code, "active", new_active)
+            status_str = "Aktif 🟢" if new_active else "Nonaktif 🔴"
+            await event.answer(f"Paket sekarang: {status_str}")
+            pkg = await db.get_package(code, bot_code=bot_code)
+            card = package_detail_card(pkg)
+            buttons = admin_package_edit_keyboard(bot_code, pkg)
+            await event.edit(card, parse_mode="html", buttons=buttons)
+            return
+
+        # 5i. Package Reorder Menu (Move Up / Move Down)
+        if data.startswith("adm_pkgreorder:"):
+            bot_code = data.split(":")[1]
+            pkgs = await db.list_all_packages(bot_code=bot_code)
+            if not pkgs:
+                await event.edit(
+                    f"Belum ada paket VIP untuk bot <b>[{html.escape(bot_code)}]</b>.",
+                    parse_mode="html",
+                    buttons=[[Button.inline(f"🔙 Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")]],
+                )
+                return
+
+            text = (
+                f"↕️ <b>Atur Posisi & Urutan Paket VIP — [{html.escape(bot_code)}]</b>\n\n"
+                f"Paket paling atas akan muncul pertama kali pada keyboard inline.\n"
+                f"Klik <b>⬆️</b> untuk menaikkan posisi dan <b>⬇️</b> untuk menurunkan posisi:\n"
+            )
+
+            buttons = []
+            for idx, p in enumerate(pkgs):
+                c = p["code"]
+                label_txt = p.get("button_label") or p["name"]
+                up_btn = Button.inline("⬆️", data=f"adm_pkgmove:{bot_code}:{c}:up") if idx > 0 else Button.inline("▪️", data="adm_noop")
+                down_btn = Button.inline("⬇️", data=f"adm_pkgmove:{bot_code}:{c}:down") if idx < len(pkgs) - 1 else Button.inline("▪️", data="adm_noop")
+                info_btn = Button.inline(f"{idx+1}. {c}: {label_txt[:16]}", data=f"adm_pkgedit_view:{bot_code}:{c}")
+                buttons.append([up_btn, down_btn, info_btn])
+
+            buttons.append([Button.inline(f"🔙 Selesai / Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")])
+            await event.edit(text, parse_mode="html", buttons=buttons)
+            return
+
+        # 5j. Package Move Action (Swap Sort Order)
+        if data.startswith("adm_pkgmove:"):
+            parts = data.split(":")
+            bot_code = parts[1]
+            code = parts[2]
+            direction = parts[3]
+            ok = await db.move_package(bot_code, code, direction)
+            if ok:
+                await event.answer("Posisi berhasil dipindahkan!")
+            else:
+                await event.answer("Tidak dapat memindahkan posisi lagi.")
+
+            pkgs = await db.list_all_packages(bot_code=bot_code)
+            text = (
+                f"↕️ <b>Atur Posisi & Urutan Paket VIP — [{html.escape(bot_code)}]</b>\n\n"
+                f"Paket paling atas akan muncul pertama kali pada keyboard inline.\n"
+                f"Klik <b>⬆️</b> untuk menaikkan posisi dan <b>⬇️</b> untuk menurunkan posisi:\n"
+            )
+            buttons = []
+            for idx, p in enumerate(pkgs):
+                c = p["code"]
+                label_txt = p.get("button_label") or p["name"]
+                up_btn = Button.inline("⬆️", data=f"adm_pkgmove:{bot_code}:{c}:up") if idx > 0 else Button.inline("▪️", data="adm_noop")
+                down_btn = Button.inline("⬇️", data=f"adm_pkgmove:{bot_code}:{c}:down") if idx < len(pkgs) - 1 else Button.inline("▪️", data="adm_noop")
+                info_btn = Button.inline(f"{idx+1}. {c}: {label_txt[:16]}", data=f"adm_pkgedit_view:{bot_code}:{c}")
+                buttons.append([up_btn, down_btn, info_btn])
+
+            buttons.append([Button.inline(f"🔙 Selesai / Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")])
+            await event.edit(text, parse_mode="html", buttons=buttons)
+            return
+
+        # 5k. Layout Columns Menu (Grid Settings)
+        if data.startswith("adm_pkgcols_menu:"):
+            bot_code = data.split(":")[1]
+            current_cols = await db.get_package_columns(bot_code=bot_code)
+            text = (
+                f"📐 <b>Pengaturan Tata Letak (Grid Layout) Tombol VIP [{html.escape(bot_code)}]</b>\n\n"
+                f"Saat ini: <b>{current_cols} Kolom per baris</b>\n\n"
+                f"Pilih tata letak susunan tombol keyboard untuk member:\n"
+                f"• <b>1 Kolom</b>: Tombol disusun vertikal penuh ke bawah.\n"
+                f"• <b>2 Kolom</b>: Tombol berdampingan grid 2x2 (contoh: <code>MV 1 | MV 2</code>, <code>MV 3 | MV 4</code>).\n"
+                f"• <b>3 Kolom</b>: 3 tombol berdampingan per baris."
+            )
+            buttons = [
+                [Button.inline("1️⃣  1 Kolom (Vertikal Penuh)" + (" ✅" if current_cols == 1 else ""), data=f"adm_pkgcols_set:{bot_code}:1")],
+                [Button.inline("2️⃣  2 Kolom (Grid MV 1 | MV 2)" + (" ✅" if current_cols == 2 else ""), data=f"adm_pkgcols_set:{bot_code}:2")],
+                [Button.inline("3️⃣  3 Kolom (Grid 3xN)" + (" ✅" if current_cols == 3 else ""), data=f"adm_pkgcols_set:{bot_code}:3")],
+                [Button.inline(f"🔙 Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")],
+            ]
+            await event.edit(text, parse_mode="html", buttons=buttons)
+            return
+
+        # 5l. Set Layout Columns
+        if data.startswith("adm_pkgcols_set:"):
+            parts = data.split(":")
+            bot_code = parts[1]
+            cols = int(parts[2])
+            await db.set_package_columns(bot_code, cols)
+            await event.answer(f"✅ Tata letak keyboard diubah menjadi {cols} kolom!")
+
+            pkgs = await db.list_all_packages(bot_code=bot_code)
+            bots = await bot_manager.list_all() if bot_manager else []
+            bot_info = next((b for b in bots if b["bot_code"] == bot_code), None)
+            cols = await db.get_package_columns(bot_code=bot_code)
+
+            status_badge = "🟢 Aktif / Online" if (bot_info and bot_info["status"] == "online") else "🔴 Nonaktif"
+            bot_username = f"@{bot_info['bot_username']}" if (bot_info and bot_info.get("bot_username")) else "-"
+            bot_name = bot_info.get("bot_name") or bot_code if bot_info else bot_code
+
+            lines = [
+                f"📦 <b>Kelola Paket VIP — [{html.escape(bot_code)}]</b>\n",
+                f"• Bot: <b>{html.escape(bot_name)}</b> ({html.escape(bot_username)})",
+                f"• Status Bot: <b>{status_badge}</b>",
+                f"• Tata Letak Keyboard: <b>{cols} Kolom (Grid)</b>",
+                f"• Total Paket VIP: <b>{len(pkgs)} paket</b>\n",
+            ]
+
+            if pkgs:
+                lines.append("<b>Daftar Paket Terdaftar:</b>")
+                for idx, p in enumerate(pkgs, 1):
+                    p_status = "🟢" if p.get("active", True) else "🔴"
+                    st_badge = button_style_badge(p.get("button_style"))
+                    lbl = f" | Label: <code>{html.escape(p['button_label'])}</code>" if p.get("button_label") else ""
+                    lines.append(
+                        f"{idx}. {p_status} <code>{html.escape(p['code'])}</code>: "
+                        f"<b>{html.escape(p['name'])}</b> — <b>{format_button_amount(p['amount'])}</b>\n"
+                        f"   ({st_badge}{lbl} | Urutan: <code>{p.get('sort_order', 100)}</code>)"
+                    )
+            else:
+                lines.append("<i>Belum ada paket VIP untuk bot ini.</i>")
+
+            lines.append("\nPilih menu aksi di bawah:")
+
+            buttons = []
+            if pkgs:
+                buttons.append([
+                    Button.inline("✏️ Edit Paket", data=f"adm_pkgedit_pick:{bot_code}"),
+                    Button.inline("➕ Tambah Paket", data=f"adm_addpkg_bot:{bot_code}"),
+                ])
+                buttons.append([
+                    Button.inline("↕️ Atur Urutan Posisi", data=f"adm_pkgreorder:{bot_code}"),
+                    Button.inline(f"📐 Kolom: {cols} Kolom", data=f"adm_pkgcols_menu:{bot_code}"),
+                ])
+                buttons.append([
+                    Button.inline("👁️ Preview Keyboard", data=f"adm_pkgpreview:{bot_code}"),
+                    Button.inline("🗑️ Hapus Paket", data=f"adm_delpkg_bot:{bot_code}"),
+                ])
+            else:
+                buttons.append([Button.inline("➕ Tambah Paket VIP", data=f"adm_addpkg_bot:{bot_code}")])
+
+            buttons.append([Button.inline("🔙 Pilih Bot Lain", data="adm_pkg_choose_bot")])
+
+            await event.edit("\n".join(lines), parse_mode="html", buttons=buttons)
+            return
+
+        # 5m. Live Preview Keyboard
+        if data.startswith("adm_pkgpreview:"):
+            bot_code = data.split(":")[1]
+            pkgs = await db.list_packages(bot_code=bot_code)
+            cols = await db.get_package_columns(bot_code=bot_code)
+
+            preview_buttons = package_buttons(config, pkgs, bot_code=bot_code, columns=cols)
+            preview_buttons.append([Button.inline(f"🔙 Selesai Preview [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}")])
+
+            text = (
+                f"👁️ <b>LIVE PREVIEW TAMPILAN KEYBOARD MEMBER</b>\n\n"
+                f"Berikut adalah preview tampilan tombol persis seperti yang dilihat oleh member di bot <b>[{html.escape(bot_code)}]</b>:\n\n"
+                f"• Format Layout: <b>{cols} Kolom</b>\n"
+                f"• Total Paket Aktif: <b>{len(pkgs)}</b>\n\n"
+                f"<i>Perhatikan warna tombol dan tata letak posisinya di bawah:</i>"
+            )
+            await event.edit(text, parse_mode="html", buttons=preview_buttons)
+            return
+
+        # No-op callback handler
+        if data == "adm_noop":
+            await event.answer()
             return
 
         if data == "adm_pkg_choose_bot":

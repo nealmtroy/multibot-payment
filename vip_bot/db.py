@@ -2,6 +2,7 @@ import asyncio
 import datetime as dt
 import logging
 from pathlib import Path
+from typing import Any
 import asyncpg
 
 LOGGER = logging.getLogger("telegram_vip_bot.db")
@@ -44,6 +45,12 @@ class Database:
                 await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS access_hash BIGINT NOT NULL DEFAULT 0;")
             except Exception as e:
                 LOGGER.warning("Could not run access_hash migration: %s", e)
+            try:
+                await conn.execute("ALTER TABLE packages ADD COLUMN IF NOT EXISTS button_style TEXT NOT NULL DEFAULT 'default';")
+                await conn.execute("ALTER TABLE packages ADD COLUMN IF NOT EXISTS button_label TEXT NOT NULL DEFAULT '';")
+                await conn.execute("ALTER TABLE packages ADD COLUMN IF NOT EXISTS row_index INT NOT NULL DEFAULT 0;")
+            except Exception as e:
+                LOGGER.warning("Could not run package columns migration: %s", e)
         LOGGER.info("PostgreSQL schema initialized successfully.")
 
     # -------------------------------------------------------------------------
@@ -115,22 +122,129 @@ class Database:
             row = await conn.fetchrow(query, bot_code, code)
             return record_to_dict(row)
 
-    async def upsert_package(self, code: str, name: str, vip_chat_id: int, amount: int, invite_expire_hours: int = 0, bot_code: str = "default") -> dict:
+    async def upsert_package(
+        self,
+        code: str,
+        name: str,
+        vip_chat_id: int,
+        amount: int,
+        invite_expire_hours: int = 0,
+        sort_order: int = 100,
+        button_style: str = "default",
+        button_label: str = "",
+        row_index: int = 0,
+        bot_code: str = "default",
+    ) -> dict:
         query = """
-        INSERT INTO packages (bot_code, code, name, vip_chat_id, amount, invite_expire_hours, active, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, true, now())
+        INSERT INTO packages (bot_code, code, name, vip_chat_id, amount, invite_expire_hours, sort_order, button_style, button_label, row_index, active, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, now())
         ON CONFLICT (bot_code, code) DO UPDATE SET
             name = EXCLUDED.name,
             vip_chat_id = EXCLUDED.vip_chat_id,
             amount = EXCLUDED.amount,
             invite_expire_hours = EXCLUDED.invite_expire_hours,
+            sort_order = COALESCE(EXCLUDED.sort_order, packages.sort_order),
+            button_style = COALESCE(EXCLUDED.button_style, packages.button_style),
+            button_label = COALESCE(EXCLUDED.button_label, packages.button_label),
+            row_index = COALESCE(EXCLUDED.row_index, packages.row_index),
             active = true,
             updated_at = now()
         RETURNING *;
         """
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(query, bot_code, code, name.strip(), int(vip_chat_id), int(amount), int(invite_expire_hours or 0))
+            row = await conn.fetchrow(
+                query,
+                bot_code,
+                code,
+                name.strip(),
+                int(vip_chat_id),
+                int(amount),
+                int(invite_expire_hours or 0),
+                int(sort_order or 100),
+                button_style or "default",
+                button_label or "",
+                int(row_index or 0),
+            )
             return record_to_dict(row)
+
+    async def update_package_field(self, bot_code: str, code: str, field: str, value: Any) -> dict | None:
+        allowed = {
+            "name": str,
+            "amount": int,
+            "vip_chat_id": int,
+            "invite_expire_hours": int,
+            "active": bool,
+            "sort_order": int,
+            "button_style": str,
+            "button_label": str,
+            "row_index": int,
+        }
+        if field not in allowed:
+            raise ValueError(f"Field {field} tidak diizinkan untuk diubah.")
+        converter = allowed[field]
+        val = converter(value)
+        query = f"UPDATE packages SET {field} = $1, updated_at = now() WHERE bot_code = $2 AND code = $3 RETURNING *"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, val, bot_code, code)
+            return record_to_dict(row)
+
+    async def move_package(self, bot_code: str, code: str, direction: str) -> bool:
+        direction = direction.lower()
+        if direction not in ("up", "down"):
+            return False
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                rows = await conn.fetch(
+                    "SELECT id, code, sort_order FROM packages WHERE bot_code = $1 ORDER BY sort_order ASC, id ASC",
+                    bot_code,
+                )
+                pkgs = records_to_dicts(rows)
+                idx = next((i for i, p in enumerate(pkgs) if p["code"] == code), None)
+                if idx is None:
+                    return False
+                if direction == "up" and idx == 0:
+                    return False
+                if direction == "down" and idx >= len(pkgs) - 1:
+                    return False
+
+                target_idx = idx - 1 if direction == "up" else idx + 1
+                current_orders = [(i + 1) * 10 for i in range(len(pkgs))]
+                current_orders[idx], current_orders[target_idx] = current_orders[target_idx], current_orders[idx]
+
+                for i, p in enumerate(pkgs):
+                    await conn.execute(
+                        "UPDATE packages SET sort_order = $1, updated_at = now() WHERE bot_code = $2 AND code = $3",
+                        current_orders[i],
+                        bot_code,
+                        p["code"],
+                    )
+                return True
+
+    async def reorder_packages(self, bot_code: str, ordered_codes: list[str]) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                for idx, c in enumerate(ordered_codes):
+                    await conn.execute(
+                        "UPDATE packages SET sort_order = $1, updated_at = now() WHERE bot_code = $2 AND code = $3",
+                        (idx + 1) * 10,
+                        bot_code,
+                        c,
+                    )
+                return True
+
+    async def get_package_columns(self, bot_code: str = "default") -> int:
+        key = f"pkg_cols_{bot_code}"
+        val = await self.get_setting(key, default="1")
+        try:
+            cols = int(val)
+            return cols if cols in (1, 2, 3) else 1
+        except (ValueError, TypeError):
+            return 1
+
+    async def set_package_columns(self, bot_code: str, cols: int) -> bool:
+        cols = int(cols) if cols in (1, 2, 3) else 1
+        key = f"pkg_cols_{bot_code}"
+        return await self.set_setting(key, str(cols))
 
     async def delete_package(self, code: str, bot_code: str = "default") -> bool:
         query = "DELETE FROM packages WHERE bot_code = $1 AND code = $2"

@@ -25,10 +25,17 @@ CREATE TABLE IF NOT EXISTS packages (
     invite_expire_hours INT NOT NULL DEFAULT 0,
     active BOOLEAN NOT NULL DEFAULT true,
     sort_order INT NOT NULL DEFAULT 100,
+    button_style TEXT NOT NULL DEFAULT 'default',
+    button_label TEXT NOT NULL DEFAULT '',
+    row_index INT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(bot_code, code)
 );
+
+ALTER TABLE packages ADD COLUMN IF NOT EXISTS button_style TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE packages ADD COLUMN IF NOT EXISTS button_label TEXT NOT NULL DEFAULT '';
+ALTER TABLE packages ADD COLUMN IF NOT EXISTS row_index INT NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS idx_packages_bot_active ON packages (bot_code, active, sort_order ASC);
 
