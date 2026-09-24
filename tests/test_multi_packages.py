@@ -24,6 +24,20 @@ def get_button_data(btn):
     return getattr(btn, "_bytes", None)
 
 
+def get_button_style(btn):
+    style_obj = getattr(btn, "style", None)
+    if style_obj is None and hasattr(btn, "type"):
+        style_obj = getattr(btn.type, "style", None)
+    if style_obj:
+        if getattr(style_obj, "bg_success", False):
+            return "success"
+        if getattr(style_obj, "bg_danger", False):
+            return "danger"
+        if getattr(style_obj, "bg_primary", False):
+            return "primary"
+    return None
+
+
 class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.config = MagicMock()
@@ -46,9 +60,15 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
 
         # Normal with multi button
         btns_multi = package_buttons(self.config, self.pkgs, include_multi_button=True)
-        self.assertEqual(len(btns_multi), 4)
-        self.assertEqual(get_button_data(btns_multi[3][0]), b"cart_mode_start")
-        self.assertIn("Pilih Beberapa Paket", btns_multi[3][0].text)
+        # 3 packages + 1 buy all + 1 choose multiple = 5 rows
+        self.assertEqual(len(btns_multi), 5)
+        self.assertEqual(get_button_data(btns_multi[3][0]), b"cart_buy_all")
+        self.assertIn("Beli Semua Paket", btns_multi[3][0].text)
+        self.assertEqual(get_button_style(btns_multi[3][0]), "success")
+
+        self.assertEqual(get_button_data(btns_multi[4][0]), b"cart_mode_start")
+        self.assertIn("Pilih Beberapa Paket", btns_multi[4][0].text)
+        self.assertEqual(get_button_style(btns_multi[4][0]), "success")
 
     def test_cart_package_buttons_empty(self):
         buttons = cart_package_buttons(self.config, self.pkgs, selected_codes=set())
@@ -63,11 +83,13 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Pilih paket di atas", buttons[3][0].text)
         # Back button
         self.assertEqual(get_button_data(buttons[4][0]), b"cart_mode_back")
+        self.assertIn("Kembali", buttons[4][0].text)
+        self.assertEqual(get_button_style(buttons[4][0]), "danger")
 
     def test_cart_package_buttons_selected(self):
         buttons = cart_package_buttons(self.config, self.pkgs, selected_codes={"vip1", "vip2"})
-        # 3 package rows + 1 checkout + 1 reset + 1 back = 6 rows
-        self.assertEqual(len(buttons), 6)
+        # 3 package rows + 1 checkout + 1 back = 5 rows (reset button removed)
+        self.assertEqual(len(buttons), 5)
         # vip1 checked
         self.assertTrue(buttons[0][0].text.startswith("✅ "))
         # vip2 checked
@@ -75,20 +97,18 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
         # vip3 unchecked
         self.assertTrue(buttons[2][0].text.startswith("⬜ "))
 
-        # Checkout button text shows 2 Paket (Rp10.000)
+        # Checkout button text shows 2 Paket (Rp10.000) with style success
         checkout_btn = buttons[3][0]
         self.assertEqual(get_button_data(checkout_btn), b"cart_checkout")
         self.assertIn("Bayar 2 Paket", checkout_btn.text)
         self.assertIn("10.000", checkout_btn.text)
+        self.assertEqual(get_button_style(checkout_btn), "success")
 
-        # Reset button
-        reset_btn = buttons[4][0]
-        self.assertEqual(get_button_data(reset_btn), b"cart_reset")
-        self.assertIn("Reset", reset_btn.text)
-
-        # Back button
-        back_btn = buttons[5][0]
+        # Back button with style danger
+        back_btn = buttons[4][0]
         self.assertEqual(get_button_data(back_btn), b"cart_mode_back")
+        self.assertIn("Kembali", back_btn.text)
+        self.assertEqual(get_button_style(back_btn), "danger")
 
     def test_qris_caption_multi(self):
         caption = qris_caption_multi(

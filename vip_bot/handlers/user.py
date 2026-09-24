@@ -412,10 +412,11 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
     @private_only
     async def start(event):
         user = await event.get_sender()
+        state_key = (event.sender_id, bot_code)
+        states.pop(state_key, None)
         await db.upsert_user(user, bot_code=bot_code)
         await handle_referral_start(event, config, db, event.pattern_match.group(1) or "", bot_code=bot_code)
         await event.respond(main_menu_keyboard_text(user), buttons=main_menu_buttons(), parse_mode="html")
-        await send_package_menu(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(pattern=r"^/buy$"))
     @private_only
@@ -465,6 +466,27 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
             "Masukkan nominal penarikan saldo (contoh: <code>50000</code>). Minimal Rp10.000:",
             parse_mode="html",
             buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
+        )
+
+    @client.on(events.CallbackQuery(data=b"cart_buy_all"))
+    async def buy_all_packages(event):
+        state_key = (event.sender_id, bot_code)
+        states.pop(state_key, None)
+        all_packages = await db.list_packages(bot_code=bot_code)
+        active_packages = [p for p in all_packages if p.get("active", True)] if all_packages else []
+        if not active_packages:
+            active_packages = [default_package(config, bot_code=bot_code)]
+        await event.answer()
+        message = await event.get_message()
+        await send_qris(
+            event,
+            config,
+            db,
+            qris_semaphore,
+            user_locks,
+            packages=active_packages,
+            invoice_message=message,
+            bot_code=bot_code,
         )
 
     @client.on(events.CallbackQuery(data=b"cart_mode_start"))

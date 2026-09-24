@@ -275,7 +275,8 @@ def package_buttons(config, store_or_packages, bot_code="default", vip_chat_id=N
             rows.append(raw_buttons[i : i + cols])
 
     if include_multi_button and len(packages) > 1:
-        rows.append([Button.inline("🛒 Pilih Beberapa Paket", b"cart_mode_start")])
+        rows.append([Button.inline("🎁 Beli Semua Paket", b"cart_buy_all", style="success")])
+        rows.append([Button.inline("🛒 Pilih Beberapa Paket", b"cart_mode_start", style="success")])
 
     return rows
 
@@ -334,12 +335,11 @@ def cart_package_buttons(config, store_or_packages, selected_codes=None, bot_cod
         total_amount = sum(int(p.get("amount") or 0) for p in selected_pkgs)
         count = len(selected)
         checkout_text = f"💳 Bayar {count} Paket ({format_button_amount(total_amount)}) ➔"
-        rows.append([Button.inline(checkout_text, b"cart_checkout")])
-        rows.append([Button.inline("🔄 Reset Pilihan", b"cart_reset")])
+        rows.append([Button.inline(checkout_text, b"cart_checkout", style="success")])
     else:
         rows.append([Button.inline("🛒 Bayar (Pilih paket di atas)", b"cart_checkout")])
 
-    rows.append([Button.inline("🔙 Kembali ke Menu Biasa", b"cart_mode_back")])
+    rows.append([Button.inline("⬅️ Kembali", b"cart_mode_back", style="danger")])
 
     return rows
 
