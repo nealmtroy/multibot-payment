@@ -180,6 +180,29 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
             # mark_delivery_done was called
             db.mark_delivery_done.assert_called_once_with("INV-TEST-001")
 
+    def test_serialize_package_dict_handles_datetime(self):
+        import datetime as dt
+        from vip_bot.helpers import serialize_package_dict
+        pkg = {
+            "id": 1,
+            "code": "vip1",
+            "name": "VIP 1",
+            "amount": 5000,
+            "vip_chat_id": -100123456,
+            "invite_expire_hours": 24,
+            "created_at": dt.datetime.now(),
+            "updated_at": dt.datetime.now(),
+        }
+        clean = serialize_package_dict(pkg)
+        self.assertNotIn("created_at", clean)
+        self.assertNotIn("updated_at", clean)
+        self.assertEqual(clean["code"], "vip1")
+        self.assertEqual(clean["amount"], 5000)
+
+        import json
+        dumped = json.dumps([clean], default=str)
+        self.assertIn("vip1", dumped)
+
 
 if __name__ == "__main__":
     unittest.main()

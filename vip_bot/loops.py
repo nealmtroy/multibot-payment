@@ -17,6 +17,7 @@ from vip_bot.helpers import (
     delete_qris_message,
     create_invite_link,
     create_package_invite_link,
+    serialize_package_dict,
     send_broadcast_to_user,
     user_link,
     plain_user_link,
@@ -178,7 +179,7 @@ async def process_paid_payment(client, config, db, payment):
         # Save all generated links into packages_json and invite_link column
         all_links_str = "\n".join(p.get("invite_link", "") for p in packages)
         first_exp = packages[0].get("invite_expires_at", "")
-        packages_json_str = json.dumps(packages)
+        packages_json_str = json.dumps([serialize_package_dict(p) for p in packages], default=str)
         if not (await db.mark_delivery_processing(payment["inv_id"], all_links_str, first_exp, packages_json=packages_json_str)):
             return
 

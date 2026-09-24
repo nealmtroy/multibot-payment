@@ -557,3 +557,20 @@ async def create_package_invite_link(client, config, db, package, inv_id):
 
 async def create_invite_link(client, config, db, payment):
     return await create_package_invite_link(client, config, db, payment, payment.get("inv_id", ""))
+
+
+def serialize_package_dict(pkg):
+    if not isinstance(pkg, dict):
+        return {}
+    res = {
+        "code": str(pkg.get("code") or ""),
+        "name": str(pkg.get("name") or ""),
+        "amount": int(pkg.get("amount") or 0),
+        "vip_chat_id": int(pkg.get("vip_chat_id") or 0) if pkg.get("vip_chat_id") else None,
+        "invite_expire_hours": int(pkg.get("invite_expire_hours") or 0),
+    }
+    if pkg.get("invite_link"):
+        res["invite_link"] = str(pkg["invite_link"])
+    if pkg.get("invite_expires_at"):
+        res["invite_expires_at"] = str(pkg["invite_expires_at"])
+    return res

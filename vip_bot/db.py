@@ -507,11 +507,11 @@ class Database:
         bot_code: str = "default",
     ):
         import json
-        from vip_bot.helpers import parse_iso_datetime, next_poll_at, display_name
+        from vip_bot.helpers import parse_iso_datetime, next_poll_at, display_name, serialize_package_dict
         payload = qris_data.get("data", {})
         
         if packages:
-            pkgs_list = list(packages)
+            pkgs_list = [serialize_package_dict(p) for p in packages]
             if len(pkgs_list) == 1:
                 single_pkg = pkgs_list[0]
                 pkg_code = single_pkg.get("code") or ""
@@ -525,15 +525,16 @@ class Database:
                 pkg_amount = sum(int(p.get("amount") or 0) for p in pkgs_list)
                 vip_chat_id = None
                 invite_expire_hours = 0
-            packages_json_str = json.dumps(pkgs_list)
+            packages_json_str = json.dumps(pkgs_list, default=str)
         else:
             package = package or {}
-            pkg_code = package.get("code") or ""
-            pkg_name = package.get("name") or ""
-            pkg_amount = int(package.get("amount") or amount)
-            vip_chat_id = package.get("vip_chat_id")
-            invite_expire_hours = int(package.get("invite_expire_hours") or 0)
-            packages_json_str = json.dumps([package]) if package else "[]"
+            clean_pkg = serialize_package_dict(package)
+            pkg_code = clean_pkg.get("code") or ""
+            pkg_name = clean_pkg.get("name") or ""
+            pkg_amount = int(clean_pkg.get("amount") or amount)
+            vip_chat_id = clean_pkg.get("vip_chat_id")
+            invite_expire_hours = int(clean_pkg.get("invite_expire_hours") or 0)
+            packages_json_str = json.dumps([clean_pkg], default=str) if package else "[]"
 
         expires_at = parse_iso_datetime(payload.get("countdown") or "")
         next_check = next_poll_at(dt.datetime.now(dt.UTC), expires_at, attempts=0, error="")
@@ -647,10 +648,12 @@ class Database:
 
     async def update_payment_packages(self, inv_id: str, packages: list[dict]):
         import json
+        from vip_bot.helpers import serialize_package_dict
+        clean_pkgs = [serialize_package_dict(p) for p in (packages or [])]
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE payments SET packages_json = $1, updated_at = now() WHERE inv_id = $2",
-                json.dumps(packages),
+                json.dumps(clean_pkgs, default=str),
                 inv_id,
             )
 
