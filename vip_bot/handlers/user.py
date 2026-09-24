@@ -24,8 +24,10 @@ from vip_bot.helpers import (
 )
 from vip_bot.messages import (
     qris_caption,
+    qris_caption_multi,
     default_package,
     package_buttons,
+    cart_package_buttons,
     main_menu_keyboard_text,
     main_menu_buttons,
     main_menu_button_labels,
@@ -33,6 +35,7 @@ from vip_bot.messages import (
 from sociabuzz_client import SociaBuzzError
 
 LOGGER = logging.getLogger("telegram_vip_bot.handlers.user")
+USER_CART_STATES = {}
 
 
 def private_only(handler):
@@ -43,19 +46,30 @@ def private_only(handler):
     return wrapped
 
 
-async def send_qris(event, config, db, qris_semaphore, user_locks, package=None, invoice_message=None, bot_code="default"):
+async def send_qris(event, config, db, qris_semaphore, user_locks, package=None, packages=None, invoice_message=None, bot_code="default"):
     user = await event.get_sender()
     lock = user_locks.setdefault((user.id, bot_code), asyncio.Lock())
     if lock.locked():
         await event.respond("QRIS kamu sedang dibuat. Tunggu beberapa detik, jangan klik berulang.")
         return
     async with lock:
-        await send_qris_locked(event, config, db, qris_semaphore, user, package, invoice_message, bot_code=bot_code)
+        await send_qris_locked(event, config, db, qris_semaphore, user, package=package, packages=packages, invoice_message=invoice_message, bot_code=bot_code)
 
 
-async def send_qris_locked(event, config, db, qris_semaphore, user, package=None, invoice_message=None, bot_code="default"):
+async def send_qris_locked(event, config, db, qris_semaphore, user, package=None, packages=None, invoice_message=None, bot_code="default"):
     await db.upsert_user(user, bot_code=bot_code)
-    package = package or default_package(config, bot_code=bot_code)
+    
+    if packages:
+        pkgs = list(packages)
+    elif package:
+        pkgs = [package]
+    else:
+        pkgs = [default_package(config, bot_code=bot_code)]
+
+    is_multi = len(pkgs) > 1
+    total_amount = sum(int(p.get("amount") or 0) for p in pkgs)
+    note_prefix = "VIP MULTI" if is_multi else pkgs[0].get("code", "VIP").upper()
+
     pending = await db.latest_pending_for_user(user.id, bot_code=bot_code)
     if pending:
         await event.respond(
@@ -82,7 +96,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
                 qris,
                 qr_bytes,
                 checkout_amount,
-            ) = await asyncio.to_thread(create_qris_with_retries_sync, config, user, int(package["amount"]), package["code"].upper())
+            ) = await asyncio.to_thread(create_qris_with_retries_sync, config, user, total_amount, note_prefix)
         socia_invoice_id = qris.get("inv_id")
         if not socia_invoice_id:
             raise SociaBuzzError(f"QRIS response missing inv_id: {qris}")
@@ -91,16 +105,28 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
         qr_file = io.BytesIO(qr_bytes)
         qr_file.name = f"{buyer_invoice_id}.png"
         payload = qris.get("data", {})
-        invoice_message = await event.client.edit_message(
-            event.chat_id,
-            invoice_message.id,
-            qris_caption(
-                package,
+        
+        if is_multi:
+            caption_text = qris_caption_multi(
+                pkgs,
                 buyer_invoice_id,
                 checkout_amount,
                 payload.get("amount") or "",
                 payload.get("countdown") or "",
-            ),
+            )
+        else:
+            caption_text = qris_caption(
+                pkgs[0],
+                buyer_invoice_id,
+                checkout_amount,
+                payload.get("amount") or "",
+                payload.get("countdown") or "",
+            )
+
+        invoice_message = await event.client.edit_message(
+            event.chat_id,
+            invoice_message.id,
+            caption_text,
             file=qr_file,
             parse_mode="html",
         )
@@ -117,10 +143,17 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
             qris,
             event.chat_id,
             invoice_message.id,
-            package=package,
+            package=pkgs[0] if not is_multi else None,
+            packages=pkgs if is_multi else None,
             referral=referral,
             bot_code=bot_code,
         )
+
+        if is_multi:
+            pkg_log_desc = f"<b>Packages ({len(pkgs)})</b>: " + ", ".join(f"{p['code']} ({format_button_amount(p['amount'])})" for p in pkgs)
+        else:
+            pkg_log_desc = f"<b>Package</b>: {html.escape(pkgs[0].get('code') or '')} {html.escape(pkgs[0].get('name') or '')} (<code>{pkgs[0].get('vip_chat_id') or ''}</code>)"
+
         await send_log(
             event.client,
             config,
@@ -130,7 +163,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
                 "<blockquote>"
                 f"<b>Bot</b>: <code>{html.escape(bot_code)}</code>\n"
                 f"<b>User</b>: {telegram_user_link(user)} (<code>{user.id}</code>)\n"
-                f"<b>Package</b>: {html.escape(package.get('code') or '')} {html.escape(package.get('name') or '')} (<code>{package.get('vip_chat_id') or ''}</code>)\n"
+                f"{pkg_log_desc}\n"
                 f"<b>Package Amount</b>: {format_button_amount(checkout_amount)}\n"
                 f"<b>QRIS Amount</b>: {html.escape(payload.get('amount') or '')}\n"
                 f"<b>Invoice</b>: <code>{html.escape(buyer_invoice_id)}</code>\n"
@@ -173,7 +206,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
                 (
                     f"<b>[{html.escape(bot_code)}] QRIS gateway timeout</b>\n"
                     f"User: {telegram_user_link(user)} (<code>{user.id}</code>)\n"
-                    f"Package: <code>{html.escape(package.get('code') or '')}</code>\n"
+                    f"Packages: <code>{[p.get('code') for p in pkgs]}</code>\n"
                     f"Error: <code>{html.escape(str(exc))}</code>"
                 ),
             )
@@ -187,16 +220,22 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
         )
 
 
-async def send_package_menu(event, config, db, message=None, bot_code="default"):
+async def send_package_menu(event, config, db, message=None, bot_code="default", cart_states=None):
     packages = await db.list_packages(bot_code=bot_code)
     cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
-    buttons = package_buttons(config, packages, bot_code=bot_code, columns=cols)
-    text = "Silakan pilih paket VIP yang ingin kamu beli:"
+    states = cart_states if cart_states is not None else USER_CART_STATES
+    user_id = event.sender_id
+    selected_codes = states.get((user_id, bot_code), set())
+    buttons = cart_package_buttons(config, packages, selected_codes=selected_codes, bot_code=bot_code, columns=cols)
+    text = (
+        "Silakan pilih paket VIP yang ingin kamu beli:\n"
+        "<i>(Kamu bisa memilih lebih dari 1 paket sekaligus)</i>"
+    )
     if message is None:
-        await event.respond(text, buttons=buttons)
+        await event.respond(text, parse_mode="html", buttons=buttons)
     else:
         try:
-            await event.client.edit_message(event.chat_id, message.id, text, buttons=buttons)
+            await event.client.edit_message(event.chat_id, message.id, text, parse_mode="html", buttons=buttons)
         except errors.MessageNotModifiedError:
             pass
 
@@ -350,7 +389,8 @@ async def create_withdrawal_request(event, config, db, user, amount, details, bo
     )
 
 
-def register_user_handlers(client, config, db, qris_semaphore, user_locks, withdrawal_states, bot_code="default"):
+def register_user_handlers(client, config, db, qris_semaphore, user_locks, withdrawal_states, bot_code="default", cart_states=None):
+    states = cart_states if cart_states is not None else USER_CART_STATES
     buy_label, profile_label, withdrawal_label = main_menu_button_labels()
 
     @client.on(events.NewMessage(pattern=r"^/start(?:\s+(.+))?$"))
@@ -360,17 +400,17 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         await db.upsert_user(user, bot_code=bot_code)
         await handle_referral_start(event, config, db, event.pattern_match.group(1) or "", bot_code=bot_code)
         await event.respond(main_menu_keyboard_text(user), buttons=main_menu_buttons(), parse_mode="html")
-        await send_package_menu(event, config, db, bot_code=bot_code)
+        await send_package_menu(event, config, db, bot_code=bot_code, cart_states=states)
 
     @client.on(events.NewMessage(pattern=r"^/buy$"))
     @private_only
     async def buy_command(event):
-        await send_package_menu(event, config, db, bot_code=bot_code)
+        await send_package_menu(event, config, db, bot_code=bot_code, cart_states=states)
 
     @client.on(events.NewMessage(func=lambda e: bool(e.is_private and e.raw_text and e.raw_text.strip() == buy_label)))
     @private_only
     async def buy_button(event):
-        await send_package_menu(event, config, db, bot_code=bot_code)
+        await send_package_menu(event, config, db, bot_code=bot_code, cart_states=states)
 
     @client.on(events.NewMessage(pattern=r"^/profile$"))
     @private_only
@@ -412,6 +452,76 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
             buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
         )
 
+    @client.on(events.CallbackQuery(pattern=rb"^cart_toggle:(.+)$"))
+    async def toggle_cart_package(event):
+        code = event.pattern_match.group(1).decode()
+        state_key = (event.sender_id, bot_code)
+        selected = states.setdefault(state_key, set())
+        if code in selected:
+            selected.remove(code)
+        else:
+            selected.add(code)
+        await event.answer()
+
+        packages = await db.list_packages(bot_code=bot_code)
+        cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
+        buttons = cart_package_buttons(config, packages, selected_codes=selected, bot_code=bot_code, columns=cols)
+        text = (
+            "Silakan pilih paket VIP yang ingin kamu beli:\n"
+            "<i>(Kamu bisa memilih lebih dari 1 paket sekaligus)</i>"
+        )
+        try:
+            await event.edit(text, parse_mode="html", buttons=buttons)
+        except errors.MessageNotModifiedError:
+            pass
+
+    @client.on(events.CallbackQuery(data=b"cart_reset"))
+    async def reset_cart(event):
+        state_key = (event.sender_id, bot_code)
+        states.pop(state_key, None)
+        await event.answer("Pilihan paket direset.")
+
+        packages = await db.list_packages(bot_code=bot_code)
+        cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
+        buttons = cart_package_buttons(config, packages, selected_codes=set(), bot_code=bot_code, columns=cols)
+        text = (
+            "Silakan pilih paket VIP yang ingin kamu beli:\n"
+            "<i>(Kamu bisa memilih lebih dari 1 paket sekaligus)</i>"
+        )
+        try:
+            await event.edit(text, parse_mode="html", buttons=buttons)
+        except errors.MessageNotModifiedError:
+            pass
+
+    @client.on(events.CallbackQuery(data=b"cart_checkout"))
+    async def checkout_cart(event):
+        state_key = (event.sender_id, bot_code)
+        selected = states.get(state_key, set())
+        if not selected:
+            await event.answer("Pilih minimal 1 paket terlebih dahulu.", alert=True)
+            return
+
+        all_packages = await db.list_packages(bot_code=bot_code)
+        selected_packages = [p for p in all_packages if p["code"] in selected]
+        if not selected_packages:
+            states.pop(state_key, None)
+            await event.answer("Paket yang dipilih tidak ditemukan atau sudah tidak aktif.", alert=True)
+            return
+
+        states.pop(state_key, None)
+        await event.answer()
+        message = await event.get_message()
+        await send_qris(
+            event,
+            config,
+            db,
+            qris_semaphore,
+            user_locks,
+            packages=selected_packages,
+            invoice_message=message,
+            bot_code=bot_code,
+        )
+
     @client.on(events.CallbackQuery(pattern=rb"^pkg:(.+)$"))
     async def choose_package(event):
         code = event.pattern_match.group(1).decode()
@@ -426,7 +536,7 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
             db,
             qris_semaphore,
             user_locks,
-            package=package,
+            packages=[package],
             invoice_message=message,
             bot_code=bot_code,
         )

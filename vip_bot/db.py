@@ -51,6 +51,10 @@ class Database:
                 await conn.execute("ALTER TABLE packages ADD COLUMN IF NOT EXISTS row_index INT NOT NULL DEFAULT 0;")
             except Exception as e:
                 LOGGER.warning("Could not run package columns migration: %s", e)
+            try:
+                await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS packages_json TEXT NOT NULL DEFAULT '[]';")
+            except Exception as e:
+                LOGGER.warning("Could not run payments packages_json migration: %s", e)
         LOGGER.info("PostgreSQL schema initialized successfully.")
 
     # -------------------------------------------------------------------------
@@ -498,12 +502,39 @@ class Database:
         qris_chat_id: int,
         qris_message_id: int,
         package: dict = None,
+        packages: list = None,
         referral: dict = None,
         bot_code: str = "default",
     ):
+        import json
         from vip_bot.helpers import parse_iso_datetime, next_poll_at, display_name
         payload = qris_data.get("data", {})
-        package = package or {}
+        
+        if packages:
+            pkgs_list = list(packages)
+            if len(pkgs_list) == 1:
+                single_pkg = pkgs_list[0]
+                pkg_code = single_pkg.get("code") or ""
+                pkg_name = single_pkg.get("name") or ""
+                pkg_amount = int(single_pkg.get("amount") or amount)
+                vip_chat_id = single_pkg.get("vip_chat_id")
+                invite_expire_hours = int(single_pkg.get("invite_expire_hours") or 0)
+            else:
+                pkg_code = "MULTI"
+                pkg_name = " + ".join(p.get("name", "") for p in pkgs_list)
+                pkg_amount = sum(int(p.get("amount") or 0) for p in pkgs_list)
+                vip_chat_id = None
+                invite_expire_hours = 0
+            packages_json_str = json.dumps(pkgs_list)
+        else:
+            package = package or {}
+            pkg_code = package.get("code") or ""
+            pkg_name = package.get("name") or ""
+            pkg_amount = int(package.get("amount") or amount)
+            vip_chat_id = package.get("vip_chat_id")
+            invite_expire_hours = int(package.get("invite_expire_hours") or 0)
+            packages_json_str = json.dumps([package]) if package else "[]"
+
         expires_at = parse_iso_datetime(payload.get("countdown") or "")
         next_check = next_poll_at(dt.datetime.now(dt.UTC), expires_at, attempts=0, error="")
         next_check_dt = parse_iso_datetime(next_check) if next_check else None
@@ -513,10 +544,10 @@ class Database:
             bot_code, user_id, username, full_name, package_code, package_name, package_amount,
             vip_chat_id, invite_expire_hours, public_invoice_id, order_id, payment_url, inv_id,
             amount, status, buyer_name, buyer_email, qris_amount, qris_expires, qris_chat_id,
-            qris_message_id, next_check_at, poll_attempts, referral_id, referrer_user_id, created_at, updated_at
+            qris_message_id, next_check_at, poll_attempts, referral_id, referrer_user_id, packages_json, created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'pending',
-            $15, $16, $17, $18, $19, $20, $21, 0, $22, $23, now(), now()
+            $15, $16, $17, $18, $19, $20, $21, 0, $22, $23, $24, now(), now()
         );
         """
         async with self.pool.acquire() as conn:
@@ -526,11 +557,11 @@ class Database:
                 user.id,
                 user.username or "",
                 display_name(user),
-                package.get("code") or "",
-                package.get("name") or "",
-                int(package.get("amount") or amount),
-                package.get("vip_chat_id"),
-                int(package.get("invite_expire_hours") or 0),
+                pkg_code,
+                pkg_name,
+                pkg_amount,
+                vip_chat_id,
+                invite_expire_hours,
                 public_invoice_id,
                 order_id,
                 payment_url,
@@ -545,6 +576,7 @@ class Database:
                 next_check_dt,
                 referral.get("id") if referral else None,
                 referral.get("referrer_user_id") if referral else None,
+                packages_json_str,
             )
 
     async def latest_pending_for_user(self, user_id: int, bot_code: str = "default") -> dict | None:
@@ -592,17 +624,35 @@ class Database:
             )
             return "UPDATE 1" in res
 
-    async def mark_delivery_processing(self, inv_id: str, invite_link: str, invite_expires_at: str) -> bool:
+    async def mark_delivery_processing(self, inv_id: str, invite_link: str, invite_expires_at: str, packages_json: str = None) -> bool:
         from vip_bot.helpers import parse_iso_datetime
         exp_dt = parse_iso_datetime(invite_expires_at) if invite_expires_at else None
         async with self.pool.acquire() as conn:
-            res = await conn.execute(
-                "UPDATE payments SET status = 'processing_delivery', invite_link = $1, invite_expires_at = $2, updated_at = now() WHERE inv_id = $3 AND status = 'processing_paid'",
-                invite_link,
-                exp_dt,
+            if packages_json is not None:
+                res = await conn.execute(
+                    "UPDATE payments SET status = 'processing_delivery', invite_link = $1, invite_expires_at = $2, packages_json = $3, updated_at = now() WHERE inv_id = $4 AND status = 'processing_paid'",
+                    invite_link,
+                    exp_dt,
+                    packages_json,
+                    inv_id,
+                )
+            else:
+                res = await conn.execute(
+                    "UPDATE payments SET status = 'processing_delivery', invite_link = $1, invite_expires_at = $2, updated_at = now() WHERE inv_id = $3 AND status = 'processing_paid'",
+                    invite_link,
+                    exp_dt,
+                    inv_id,
+                )
+            return "UPDATE 1" in res
+
+    async def update_payment_packages(self, inv_id: str, packages: list[dict]):
+        import json
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE payments SET packages_json = $1, updated_at = now() WHERE inv_id = $2",
+                json.dumps(packages),
                 inv_id,
             )
-            return "UPDATE 1" in res
 
     async def mark_delivery_done(self, inv_id: str):
         async with self.pool.acquire() as conn:

@@ -65,6 +65,46 @@ def custom_qris_caption(inv_id, checkout_amount, final_amount, expires, user):
     return "\n".join(lines)
 
 
+def qris_caption_multi(packages, inv_id, checkout_amount, final_amount, expires):
+    public_invoice = html.escape(inv_id)
+    human_expires = format_custom_qris_expiry(expires) if expires else ""
+    pkg_lines = []
+    for p in packages:
+        p_name = html.escape(p.get("name") or "VIP")
+        p_amount = format_rupiah(int(p.get("amount") or 0))
+        pkg_lines.append(f"• <b>{p_name}</b> ({p_amount})")
+    pkg_list_str = "\n".join(pkg_lines)
+    
+    count = len(packages)
+    detail_lines = [
+        f"<b>Kode Pesanan</b>: <code>{public_invoice}</code>",
+        f"<b>Total {count} Paket</b>: {format_rupiah(checkout_amount)}",
+    ]
+    if final_amount:
+        detail_lines.append(f"<b>Nominal QRIS</b>: {html.escape(final_amount)}")
+    if human_expires:
+        detail_lines.append(f"<b>⏳ Batas Bayar</b>: {human_expires}")
+    detail_lines_str = "\n".join(detail_lines)
+    
+    lines = [
+        f"<b>Akses {count} Group VIP</b>",
+        "",
+        f"<blockquote>{detail_lines_str}</blockquote>",
+        "",
+        "📦 <b>Daftar Paket Dipilih:</b>",
+        pkg_list_str,
+        "",
+        "📌 <b>Aturan pembayaran</b>",
+        "• Scan QRIS ini lalu bayar sesuai nominal QRIS.",
+        "• Bayar 1 kali saja, jangan diulang.",
+        "• QRIS ini unik khusus pesanan kamu.",
+        "• Status dicek otomatis, tidak perlu kirim bukti transfer.",
+        "",
+        f"Setelah pembayaran terdeteksi, link akses untuk semua ({count}) group akan langsung dikirim otomatis.",
+    ]
+    return "\n".join(lines)
+
+
 def paid_message(invite_link, package_name="VIP", invite_hours=24, group_url=""):
     safe_package_name = html.escape(package_name)
     safe_group_url = html.escape(group_url or "")
@@ -80,12 +120,46 @@ def paid_message(invite_link, package_name="VIP", invite_hours=24, group_url="")
     )
 
 
+def paid_message_multi(packages, invite_hours=24):
+    count = len(packages)
+    lines = [
+        "✅ <b>Pembayaran berhasil terdeteksi!</b>\n",
+        f"Akses <b>{count} Group VIP</b> kamu sudah aktif:\n",
+    ]
+    for idx, pkg in enumerate(packages, 1):
+        safe_name = html.escape(pkg.get("name") or "VIP")
+        invite_link = pkg.get("invite_link") or ""
+        vip_chat_id = pkg.get("vip_chat_id")
+        group_url = internal_telegram_chat_url(vip_chat_id) if vip_chat_id else ""
+        group_link = f'<a href="{html.escape(group_url)}">Buka {safe_name}</a>' if group_url else f"Buka {safe_name}"
+        lines.append(
+            f"📦 <b>{idx}. {safe_name}</b>\n"
+            f"1️⃣ Join group: {html.escape(invite_link)}\n"
+            f"2️⃣ Buka group: {group_link}\n"
+        )
+    hours = int(invite_hours) if invite_hours else 24
+    lines.append(f"⚠️ Link join hanya bisa dipakai <b>1 kali</b> dan berlaku <b>{hours} jam</b>.")
+    return "\n".join(lines)
+
+
 def paid_message_buttons(payment):
     url = internal_telegram_chat_url(payment.get("vip_chat_id"))
     if not url:
         return None
     package_name = (payment.get("package_name") or "VIP").strip() or "VIP"
     return [[Button.url(f"Buka {package_name}", url)]]
+
+
+def paid_message_buttons_multi(packages):
+    buttons = []
+    for pkg in packages:
+        vip_chat_id = pkg.get("vip_chat_id")
+        if vip_chat_id:
+            url = internal_telegram_chat_url(vip_chat_id)
+            if url:
+                name = (pkg.get("name") or "VIP").strip() or "VIP"
+                buttons.append([Button.url(f"Buka {name}", url)])
+    return buttons if buttons else None
 
 
 def invalid_payment_message():
@@ -199,6 +273,68 @@ def package_buttons(config, store_or_packages, bot_code="default", vip_chat_id=N
     rows = []
     for i in range(0, len(raw_buttons), cols):
         rows.append(raw_buttons[i : i + cols])
+    return rows
+
+
+def cart_package_buttons(config, store_or_packages, selected_codes=None, bot_code="default", vip_chat_id=None, columns=1):
+    if isinstance(store_or_packages, list):
+        packages = store_or_packages
+    elif hasattr(store_or_packages, "list_packages"):
+        res = store_or_packages.list_packages(bot_code=bot_code)
+        import inspect
+        packages = [] if inspect.iscoroutine(res) else (res or [])
+    else:
+        packages = []
+
+    if not packages:
+        packages = [default_package(config, bot_code=bot_code, vip_chat_id=vip_chat_id)]
+
+    selected = set(selected_codes or [])
+
+    def cart_label(p):
+        prefix = "✅ " if p["code"] in selected else "⬜ "
+        base = package_label(p)
+        return f"{prefix}{base}"
+
+    has_explicit_rows = any(int(p.get("row_index") or 0) > 0 for p in packages)
+    if has_explicit_rows:
+        from collections import defaultdict
+        row_map = defaultdict(list)
+        for p in packages:
+            r = int(p.get("row_index") or 0)
+            if r == 0:
+                r = 9999
+            btn = Button.inline(
+                cart_label(p),
+                data=f"cart_toggle:{p['code']}",
+                style=telethon_button_style(p.get("button_style")),
+            )
+            row_map[r].append(btn)
+        rows = [row_map[r] for r in sorted(row_map.keys())]
+    else:
+        cols = max(1, min(int(columns or 1), 3))
+        raw_buttons = [
+            Button.inline(
+                cart_label(p),
+                data=f"cart_toggle:{p['code']}",
+                style=telethon_button_style(p.get("button_style")),
+            )
+            for p in packages
+        ]
+        rows = []
+        for i in range(0, len(raw_buttons), cols):
+            rows.append(raw_buttons[i : i + cols])
+
+    if selected:
+        selected_pkgs = [p for p in packages if p["code"] in selected]
+        total_amount = sum(int(p.get("amount") or 0) for p in selected_pkgs)
+        count = len(selected)
+        checkout_text = f"💳 Bayar {count} Paket ({format_button_amount(total_amount)}) ➔"
+        rows.append([Button.inline(checkout_text, b"cart_checkout")])
+        rows.append([Button.inline("🔄 Reset Pilihan", b"cart_reset")])
+    else:
+        rows.append([Button.inline("🛒 Bayar (Pilih paket di atas)", b"cart_checkout")])
+
     return rows
 
 

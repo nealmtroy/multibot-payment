@@ -16,6 +16,7 @@ from vip_bot.helpers import (
     safe_send_user,
     delete_qris_message,
     create_invite_link,
+    create_package_invite_link,
     send_broadcast_to_user,
     user_link,
     plain_user_link,
@@ -29,6 +30,9 @@ from vip_bot.messages import (
     timeout_payment_message,
     package_buttons,
     paid_message,
+    paid_message_multi,
+    paid_message_buttons,
+    paid_message_buttons_multi,
 )
 
 LOGGER = logging.getLogger("telegram_vip_bot.loops")
@@ -105,8 +109,9 @@ async def credit_referral_if_needed(client, config, db, payment):
 
 
 async def process_paid_payment(client, config, db, payment):
+    import json
     bot_code = payment.get("bot_code") or "default"
-    is_custom = payment.get("package_code") == "CUSTOM" or not payment.get("vip_chat_id")
+    is_custom = payment.get("package_code") == "CUSTOM" or (not payment.get("vip_chat_id") and not payment.get("packages_json"))
     if is_custom:
         if not (await db.claim_paid_processing(payment["inv_id"])):
             return
@@ -130,6 +135,105 @@ async def process_paid_payment(client, config, db, payment):
         )
         return
 
+    # Check multi-packages
+    packages = []
+    raw_pkgs = payment.get("packages_json")
+    if raw_pkgs:
+        try:
+            packages = json.loads(raw_pkgs) if isinstance(raw_pkgs, str) else list(raw_pkgs)
+        except Exception:
+            packages = []
+
+    is_multi = len(packages) > 1
+
+    if is_multi:
+        if payment["status"] != "delivery_error":
+            if not (await db.claim_paid_processing(payment["inv_id"])):
+                return
+
+        # Generate invite link for each package if not already generated
+        for pkg in packages:
+            if not pkg.get("invite_link"):
+                try:
+                    link, exp_iso = await create_package_invite_link(client, config, db, pkg, payment["inv_id"])
+                    pkg["invite_link"] = link
+                    pkg["invite_expires_at"] = exp_iso
+                except Exception as exc:
+                    LOGGER.exception("Failed to create invite link for package %s in payment %s", pkg.get("code"), payment["inv_id"])
+                    await db.update_payment_packages(payment["inv_id"], packages)
+                    await db.mark_invite_error(payment["inv_id"], f"Package {pkg.get('code')}: {exc}")
+                    await send_log(
+                        client,
+                        config,
+                        db,
+                        (
+                            f"<b>[{html.escape(bot_code)}] Multi-Invite creation error</b>\n"
+                            f"Invoice: <code>{html.escape(payment.get('public_invoice_id') or payment['inv_id'])}</code>\n"
+                            f"Package: <code>{html.escape(pkg.get('code') or '')}</code>\n"
+                            f"Error: <code>{html.escape(str(exc))}</code>"
+                        ),
+                    )
+                    return
+
+        # Save all generated links into packages_json and invite_link column
+        all_links_str = "\n".join(p.get("invite_link", "") for p in packages)
+        first_exp = packages[0].get("invite_expires_at", "")
+        packages_json_str = json.dumps(packages)
+        if not (await db.mark_delivery_processing(payment["inv_id"], all_links_str, first_exp, packages_json=packages_json_str)):
+            return
+
+        await delete_qris_message(client, payment)
+        delivery_status = await safe_send_user(
+            client,
+            config,
+            db,
+            payment["user_id"],
+            paid_message_multi(packages, int(payment.get("invite_expire_hours") or 0) or config.invite_expire_hours),
+            parse_mode="html",
+            link_preview=False,
+            buttons=paid_message_buttons_multi(packages),
+        )
+        if delivery_status != "sent":
+            if delivery_status == "blocked":
+                await db.mark_delivery_blocked(payment["inv_id"], "User blocked the bot")
+                await send_log(
+                    client,
+                    config,
+                    db,
+                    (
+                        f"<b>[{html.escape(bot_code)}] Invite delivery blocked</b>\n"
+                        f"User: {user_link(payment)} (<code>{payment['user_id']}</code>)\n"
+                        f"Invoice: <code>{html.escape(payment.get('public_invoice_id') or payment['inv_id'])}</code>\n"
+                        "Status: <code>User blocked the bot, delivery will not be retried</code>"
+                    ),
+                )
+            else:
+                await db.mark_delivery_error(payment["inv_id"], "Failed to send invite links to user")
+            return
+
+        await db.mark_delivery_done(payment["inv_id"])
+        await credit_referral_if_needed(client, config, db, payment)
+
+        links_log = "\n".join(f"• {html.escape(p.get('name') or p.get('code') or 'VIP')}: {html.escape(p.get('invite_link') or '')}" for p in packages)
+        await send_log(
+            client,
+            config,
+            db,
+            (
+                f"<b>[{html.escape(bot_code)}] MULTI-PAYMENT PAID</b>\n\n"
+                "<blockquote>"
+                f"<b>Bot</b>: <code>{html.escape(bot_code)}</code>\n"
+                f"<b>User</b>: {user_link(payment)} (<code>{payment['user_id']}</code>)\n"
+                f"<b>Total Packages</b>: {len(packages)}\n"
+                f"<b>Invoice</b>: <code>{html.escape(payment.get('public_invoice_id') or payment['inv_id'])}</code>\n"
+                f"<b>Internal Invoice</b>: <code>{html.escape(payment['inv_id'])}</code>\n"
+                f"<b>Invite Links</b>:\n{links_log}"
+                "</blockquote>"
+            ),
+        )
+        return
+
+    # Single package (legacy or single selection)
     if payment["status"] == "delivery_error":
         invite_link = payment.get("invite_link") or ""
         invite_expires_at = payment.get("invite_expires_at") or ""
@@ -183,6 +287,7 @@ async def process_paid_payment(client, config, db, payment):
         ),
         parse_mode="html",
         link_preview=False,
+        buttons=paid_message_buttons(payment),
     )
     if delivery_status != "sent":
         if delivery_status == "blocked":

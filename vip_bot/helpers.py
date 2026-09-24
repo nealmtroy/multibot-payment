@@ -537,19 +537,23 @@ async def delete_qris_message(client, payment):
         pass
 
 
-async def create_invite_link(client, config, db, payment):
-    vip_chat_id = int(payment.get("vip_chat_id") or 0) or (await runtime_vip_chat_id(config, db))
+async def create_package_invite_link(client, config, db, package, inv_id):
+    vip_chat_id = int(package.get("vip_chat_id") or 0) or (await runtime_vip_chat_id(config, db))
     if not vip_chat_id:
-        raise RuntimeError("VIP chat belum di-set. Silakan atur melalui menu Kelola Paket VIP atau Pengaturan.")
-    invite_hours = int(payment.get("invite_expire_hours") or 0) or config.invite_expire_hours
+        raise RuntimeError(f"VIP chat belum di-set untuk paket {package.get('code', '')}. Silakan atur melalui menu Kelola Paket VIP atau Pengaturan.")
+    invite_hours = int(package.get("invite_expire_hours") or 0) or config.invite_expire_hours
     expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(hours=invite_hours)
-    title_name = payment.get("package_name") or "VIP"
+    title_name = package.get("name") or package.get("package_name") or "VIP"
     result = await client(
         functions.messages.ExportChatInviteRequest(
             peer=vip_chat_id,
             expire_date=expires_at,
             usage_limit=1,
-            title=f"{title_name} {payment['inv_id']}",
+            title=f"{title_name} {inv_id}",
         )
     )
     return result.link, expires_at.replace(microsecond=0).isoformat()
+
+
+async def create_invite_link(client, config, db, payment):
+    return await create_package_invite_link(client, config, db, payment, payment.get("inv_id", ""))

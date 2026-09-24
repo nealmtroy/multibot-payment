@@ -1,0 +1,177 @@
+import sys
+from pathlib import Path
+
+# Ensure MultiBot_Payment is first in sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
+from vip_bot.messages import (
+    cart_package_buttons,
+    qris_caption_multi,
+    paid_message_multi,
+    paid_message_buttons_multi,
+)
+from vip_bot.helpers import create_package_invite_link
+from vip_bot.loops import process_paid_payment
+
+
+class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.config = MagicMock()
+        self.config.payment_amount = 50000
+        self.config.vip_chat_id = -1001111111111
+        self.config.invite_expire_hours = 24
+
+        self.pkgs = [
+            {"code": "vip1", "name": "VIP Anime", "amount": 5000, "vip_chat_id": -1001111111111, "invite_expire_hours": 24},
+            {"code": "vip2", "name": "VIP Movie", "amount": 5000, "vip_chat_id": -1002222222222, "invite_expire_hours": 48},
+            {"code": "vip3", "name": "VIP Series", "amount": 10000, "vip_chat_id": -1003333333333, "invite_expire_hours": 24},
+        ]
+
+    def test_cart_package_buttons_empty(self):
+        buttons = cart_package_buttons(self.config, self.pkgs, selected_codes=set())
+        # 3 package rows + 1 action row
+        self.assertEqual(len(buttons), 4)
+        # Checkbox unchecked
+        self.assertTrue(buttons[0][0].text.startswith("⬜ "))
+        self.assertIn("VIP Anime", buttons[0][0].text)
+        self.assertEqual(buttons[0][0].data, b"cart_toggle:vip1")
+        # Bottom action button
+        self.assertEqual(buttons[3][0].data, b"cart_checkout")
+        self.assertIn("Pilih paket di atas", buttons[3][0].text)
+
+    def test_cart_package_buttons_selected(self):
+        buttons = cart_package_buttons(self.config, self.pkgs, selected_codes={"vip1", "vip2"})
+        # 3 package rows + 2 action rows (checkout + reset)
+        self.assertEqual(len(buttons), 5)
+        # vip1 checked
+        self.assertTrue(buttons[0][0].text.startswith("✅ "))
+        # vip2 checked
+        self.assertTrue(buttons[1][0].text.startswith("✅ "))
+        # vip3 unchecked
+        self.assertTrue(buttons[2][0].text.startswith("⬜ "))
+
+        # Checkout button text shows 2 Paket (Rp10.000)
+        checkout_btn = buttons[3][0]
+        self.assertEqual(checkout_btn.data, b"cart_checkout")
+        self.assertIn("Bayar 2 Paket", checkout_btn.text)
+        self.assertIn("10.000", checkout_btn.text)
+
+        # Reset button
+        reset_btn = buttons[4][0]
+        self.assertEqual(reset_btn.data, b"cart_reset")
+        self.assertIn("Reset", reset_btn.text)
+
+    def test_qris_caption_multi(self):
+        caption = qris_caption_multi(
+            [self.pkgs[0], self.pkgs[1]],
+            inv_id="VIP-260924-ABC123",
+            checkout_amount=10000,
+            final_amount="Rp10.035",
+            expires="2026-09-24T12:00:00Z",
+        )
+        self.assertIn("Akses 2 Group VIP", caption)
+        self.assertIn("VIP-260924-ABC123", caption)
+        self.assertIn("Total 2 Paket", caption)
+        self.assertIn("10.000", caption)
+        self.assertIn("VIP Anime", caption)
+        self.assertIn("VIP Movie", caption)
+        self.assertIn("Rp10.035", caption)
+
+    def test_paid_message_multi(self):
+        pkgs_with_links = [
+            {
+                "code": "vip1",
+                "name": "VIP Anime",
+                "amount": 5000,
+                "vip_chat_id": -1001111111111,
+                "invite_link": "https://t.me/+link_anime",
+            },
+            {
+                "code": "vip2",
+                "name": "VIP Movie",
+                "amount": 5000,
+                "vip_chat_id": -1002222222222,
+                "invite_link": "https://t.me/+link_movie",
+            },
+        ]
+        msg = paid_message_multi(pkgs_with_links, invite_hours=24)
+        self.assertIn("Akses <b>2 Group VIP</b> kamu sudah aktif", msg)
+        self.assertIn("1. VIP Anime", msg)
+        self.assertIn("https://t.me/+link_anime", msg)
+        self.assertIn("2. VIP Movie", msg)
+        self.assertIn("https://t.me/+link_movie", msg)
+        self.assertIn("24 jam", msg)
+
+    def test_paid_message_buttons_multi(self):
+        pkgs = [
+            {"name": "VIP Anime", "vip_chat_id": -1001111111111},
+            {"name": "VIP Movie", "vip_chat_id": -1002222222222},
+        ]
+        buttons = paid_message_buttons_multi(pkgs)
+        self.assertIsNotNone(buttons)
+        self.assertEqual(len(buttons), 2)
+        self.assertEqual(buttons[0][0].text, "Buka VIP Anime")
+        self.assertEqual(buttons[1][0].text, "Buka VIP Movie")
+
+    async def test_create_package_invite_link(self):
+        client = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.link = "https://t.me/+mock_invite_link"
+        client.return_value = mock_result
+        db = MagicMock()
+
+        pkg = {"code": "vip1", "name": "VIP Anime", "vip_chat_id": -1001234567, "invite_expire_hours": 12}
+        link, exp = await create_package_invite_link(client, self.config, db, pkg, "INV-123")
+        self.assertEqual(link, "https://t.me/+mock_invite_link")
+        self.assertTrue(bool(exp))
+        client.assert_called_once()
+
+    async def test_process_paid_payment_multi(self):
+        client = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.link = "https://t.me/+mock_link"
+        client.return_value = mock_result
+
+        db = MagicMock()
+        db.claim_paid_processing = AsyncMock(return_value=True)
+        db.mark_delivery_processing = AsyncMock(return_value=True)
+        db.mark_delivery_done = AsyncMock()
+        db.update_payment_packages = AsyncMock()
+        db.get_setting = AsyncMock(return_value=None)
+        db.pending_referral_for_user = AsyncMock(return_value=None)
+
+        import json
+        payment = {
+            "inv_id": "INV-TEST-001",
+            "bot_code": "default",
+            "user_id": 998877,
+            "status": "pending",
+            "amount": 10000,
+            "package_amount": 10000,
+            "packages_json": json.dumps(self.pkgs[:2]),
+        }
+
+        with patch("vip_bot.loops.delete_qris_message", new_callable=AsyncMock), \
+             patch("vip_bot.loops.safe_send_user", new_callable=AsyncMock) as mock_send, \
+             patch("vip_bot.loops.send_log", new_callable=AsyncMock):
+            mock_send.return_value = "sent"
+            await process_paid_payment(client, self.config, db, payment)
+
+            # Claim was called
+            db.claim_paid_processing.assert_called_once_with("INV-TEST-001")
+            # mark_delivery_processing was called
+            db.mark_delivery_processing.assert_called_once()
+            # safe_send_user was called with multi message
+            mock_send.assert_called_once()
+            call_text = mock_send.call_args[0][4]
+            self.assertIn("Akses <b>2 Group VIP</b>", call_text)
+            self.assertIn("1. VIP Anime", call_text)
+            self.assertIn("2. VIP Movie", call_text)
+            # mark_delivery_done was called
+            db.mark_delivery_done.assert_called_once_with("INV-TEST-001")
+
+
+if __name__ == "__main__":
+    unittest.main()
