@@ -220,7 +220,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
         )
 
 
-async def send_package_menu(event, config, db, message=None, bot_code="default"):
+async def send_package_menu(event, config, db, message=None, bot_code="default", cart_states=None, **kwargs):
     packages = await db.list_packages(bot_code=bot_code)
     cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
     buttons = package_buttons(config, packages, bot_code=bot_code, columns=cols, include_multi_button=True)
@@ -415,17 +415,17 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         await db.upsert_user(user, bot_code=bot_code)
         await handle_referral_start(event, config, db, event.pattern_match.group(1) or "", bot_code=bot_code)
         await event.respond(main_menu_keyboard_text(user), buttons=main_menu_buttons(), parse_mode="html")
-        await send_package_menu(event, config, db, bot_code=bot_code, cart_states=states)
+        await send_package_menu(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(pattern=r"^/buy$"))
     @private_only
     async def buy_command(event):
-        await send_package_menu(event, config, db, bot_code=bot_code, cart_states=states)
+        await send_package_menu(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(func=lambda e: bool(e.is_private and e.raw_text and e.raw_text.strip() == buy_label)))
     @private_only
     async def buy_button(event):
-        await send_package_menu(event, config, db, bot_code=bot_code, cart_states=states)
+        await send_package_menu(event, config, db, bot_code=bot_code)
 
     @client.on(events.NewMessage(pattern=r"^/profile$"))
     @private_only
