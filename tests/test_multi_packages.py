@@ -16,6 +16,14 @@ from vip_bot.helpers import create_package_invite_link
 from vip_bot.loops import process_paid_payment
 
 
+def get_button_data(btn):
+    if hasattr(btn, "data"):
+        return btn.data
+    if hasattr(btn, "type") and hasattr(btn.type, "data"):
+        return btn.type.data
+    return getattr(btn, "_bytes", None)
+
+
 class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.config = MagicMock()
@@ -36,9 +44,9 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
         # Checkbox unchecked
         self.assertTrue(buttons[0][0].text.startswith("⬜ "))
         self.assertIn("VIP Anime", buttons[0][0].text)
-        self.assertEqual(buttons[0][0].data, b"cart_toggle:vip1")
+        self.assertEqual(get_button_data(buttons[0][0]), b"cart_toggle:vip1")
         # Bottom action button
-        self.assertEqual(buttons[3][0].data, b"cart_checkout")
+        self.assertEqual(get_button_data(buttons[3][0]), b"cart_checkout")
         self.assertIn("Pilih paket di atas", buttons[3][0].text)
 
     def test_cart_package_buttons_selected(self):
@@ -54,13 +62,13 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
 
         # Checkout button text shows 2 Paket (Rp10.000)
         checkout_btn = buttons[3][0]
-        self.assertEqual(checkout_btn.data, b"cart_checkout")
+        self.assertEqual(get_button_data(checkout_btn), b"cart_checkout")
         self.assertIn("Bayar 2 Paket", checkout_btn.text)
         self.assertIn("10.000", checkout_btn.text)
 
         # Reset button
         reset_btn = buttons[4][0]
-        self.assertEqual(reset_btn.data, b"cart_reset")
+        self.assertEqual(get_button_data(reset_btn), b"cart_reset")
         self.assertIn("Reset", reset_btn.text)
 
     def test_qris_caption_multi(self):
