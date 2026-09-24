@@ -230,7 +230,7 @@ def package_label(package):
     return f"{package['name']} - {format_button_amount(package['amount'])}"
 
 
-def package_buttons(config, store_or_packages, bot_code="default", vip_chat_id=None, columns=1):
+def package_buttons(config, store_or_packages, bot_code="default", vip_chat_id=None, columns=1, include_multi_button=False):
     if isinstance(store_or_packages, list):
         packages = store_or_packages
     elif hasattr(store_or_packages, "list_packages"):
@@ -258,21 +258,25 @@ def package_buttons(config, store_or_packages, bot_code="default", vip_chat_id=N
                 style=telethon_button_style(p.get("button_style")),
             )
             row_map[r].append(btn)
-        return [row_map[r] for r in sorted(row_map.keys())]
+        rows = [row_map[r] for r in sorted(row_map.keys())]
+    else:
+        cols = max(1, min(int(columns or 1), 3))
+        raw_buttons = [
+            Button.inline(
+                package_label(p),
+                data=f"pkg:{p['code']}",
+                style=telethon_button_style(p.get("button_style")),
+            )
+            for p in packages
+        ]
 
-    cols = max(1, min(int(columns or 1), 3))
-    raw_buttons = [
-        Button.inline(
-            package_label(p),
-            data=f"pkg:{p['code']}",
-            style=telethon_button_style(p.get("button_style")),
-        )
-        for p in packages
-    ]
+        rows = []
+        for i in range(0, len(raw_buttons), cols):
+            rows.append(raw_buttons[i : i + cols])
 
-    rows = []
-    for i in range(0, len(raw_buttons), cols):
-        rows.append(raw_buttons[i : i + cols])
+    if include_multi_button and len(packages) > 1:
+        rows.append([Button.inline("🛒 Pilih Beberapa Paket", b"cart_mode_start")])
+
     return rows
 
 
@@ -334,6 +338,8 @@ def cart_package_buttons(config, store_or_packages, selected_codes=None, bot_cod
         rows.append([Button.inline("🔄 Reset Pilihan", b"cart_reset")])
     else:
         rows.append([Button.inline("🛒 Bayar (Pilih paket di atas)", b"cart_checkout")])
+
+    rows.append([Button.inline("🔙 Kembali ke Menu Biasa", b"cart_mode_back")])
 
     return rows
 

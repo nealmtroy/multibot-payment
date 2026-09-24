@@ -220,7 +220,21 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
         )
 
 
-async def send_package_menu(event, config, db, message=None, bot_code="default", cart_states=None):
+async def send_package_menu(event, config, db, message=None, bot_code="default"):
+    packages = await db.list_packages(bot_code=bot_code)
+    cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
+    buttons = package_buttons(config, packages, bot_code=bot_code, columns=cols, include_multi_button=True)
+    text = "Silakan pilih paket VIP yang ingin kamu beli:"
+    if message is None:
+        await event.respond(text, buttons=buttons)
+    else:
+        try:
+            await event.client.edit_message(event.chat_id, message.id, text, buttons=buttons)
+        except errors.MessageNotModifiedError:
+            pass
+
+
+async def send_cart_menu(event, config, db, message=None, bot_code="default", cart_states=None):
     packages = await db.list_packages(bot_code=bot_code)
     cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
     states = cart_states if cart_states is not None else USER_CART_STATES
@@ -228,8 +242,9 @@ async def send_package_menu(event, config, db, message=None, bot_code="default",
     selected_codes = states.get((user_id, bot_code), set())
     buttons = cart_package_buttons(config, packages, selected_codes=selected_codes, bot_code=bot_code, columns=cols)
     text = (
-        "Silakan pilih paket VIP yang ingin kamu beli:\n"
-        "<i>(Kamu bisa memilih lebih dari 1 paket sekaligus)</i>"
+        "🛒 <b>Pilih Beberapa Paket VIP</b>\n\n"
+        "Centang paket yang ingin kamu beli secara bersamaan:\n"
+        "<i>(Klik paket di bawah untuk memilih/membatalkan centang)</i>"
     )
     if message is None:
         await event.respond(text, parse_mode="html", buttons=buttons)
@@ -452,6 +467,20 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
             buttons=[[Button.inline("❌ Batalkan", b"withdraw_cancel")]],
         )
 
+    @client.on(events.CallbackQuery(data=b"cart_mode_start"))
+    async def enter_cart_mode(event):
+        await event.answer()
+        message = await event.get_message()
+        await send_cart_menu(event, config, db, message=message, bot_code=bot_code, cart_states=states)
+
+    @client.on(events.CallbackQuery(data=b"cart_mode_back"))
+    async def exit_cart_mode(event):
+        state_key = (event.sender_id, bot_code)
+        states.pop(state_key, None)
+        await event.answer()
+        message = await event.get_message()
+        await send_package_menu(event, config, db, message=message, bot_code=bot_code)
+
     @client.on(events.CallbackQuery(pattern=rb"^cart_toggle:(.+)$"))
     async def toggle_cart_package(event):
         code = event.pattern_match.group(1).decode()
@@ -462,36 +491,16 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         else:
             selected.add(code)
         await event.answer()
-
-        packages = await db.list_packages(bot_code=bot_code)
-        cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
-        buttons = cart_package_buttons(config, packages, selected_codes=selected, bot_code=bot_code, columns=cols)
-        text = (
-            "Silakan pilih paket VIP yang ingin kamu beli:\n"
-            "<i>(Kamu bisa memilih lebih dari 1 paket sekaligus)</i>"
-        )
-        try:
-            await event.edit(text, parse_mode="html", buttons=buttons)
-        except errors.MessageNotModifiedError:
-            pass
+        message = await event.get_message()
+        await send_cart_menu(event, config, db, message=message, bot_code=bot_code, cart_states=states)
 
     @client.on(events.CallbackQuery(data=b"cart_reset"))
     async def reset_cart(event):
         state_key = (event.sender_id, bot_code)
         states.pop(state_key, None)
         await event.answer("Pilihan paket direset.")
-
-        packages = await db.list_packages(bot_code=bot_code)
-        cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
-        buttons = cart_package_buttons(config, packages, selected_codes=set(), bot_code=bot_code, columns=cols)
-        text = (
-            "Silakan pilih paket VIP yang ingin kamu beli:\n"
-            "<i>(Kamu bisa memilih lebih dari 1 paket sekaligus)</i>"
-        )
-        try:
-            await event.edit(text, parse_mode="html", buttons=buttons)
-        except errors.MessageNotModifiedError:
-            pass
+        message = await event.get_message()
+        await send_cart_menu(event, config, db, message=message, bot_code=bot_code, cart_states=states)
 
     @client.on(events.CallbackQuery(data=b"cart_checkout"))
     async def checkout_cart(event):
@@ -536,7 +545,7 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
             db,
             qris_semaphore,
             user_locks,
-            packages=[package],
+            package=package,
             invoice_message=message,
             bot_code=bot_code,
         )

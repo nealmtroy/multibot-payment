@@ -37,10 +37,23 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
             {"code": "vip3", "name": "VIP Series", "amount": 10000, "vip_chat_id": -1003333333333, "invite_expire_hours": 24},
         ]
 
+    def test_package_buttons_normal_and_multi(self):
+        from vip_bot.messages import package_buttons
+        # Normal without multi button
+        btns_normal = package_buttons(self.config, self.pkgs, include_multi_button=False)
+        self.assertEqual(len(btns_normal), 3)
+        self.assertEqual(get_button_data(btns_normal[0][0]), b"pkg:vip1")
+
+        # Normal with multi button
+        btns_multi = package_buttons(self.config, self.pkgs, include_multi_button=True)
+        self.assertEqual(len(btns_multi), 4)
+        self.assertEqual(get_button_data(btns_multi[3][0]), b"cart_mode_start")
+        self.assertIn("Pilih Beberapa Paket", btns_multi[3][0].text)
+
     def test_cart_package_buttons_empty(self):
         buttons = cart_package_buttons(self.config, self.pkgs, selected_codes=set())
-        # 3 package rows + 1 action row
-        self.assertEqual(len(buttons), 4)
+        # 3 package rows + 1 action row + 1 back row = 5 rows
+        self.assertEqual(len(buttons), 5)
         # Checkbox unchecked
         self.assertTrue(buttons[0][0].text.startswith("⬜ "))
         self.assertIn("VIP Anime", buttons[0][0].text)
@@ -48,11 +61,13 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
         # Bottom action button
         self.assertEqual(get_button_data(buttons[3][0]), b"cart_checkout")
         self.assertIn("Pilih paket di atas", buttons[3][0].text)
+        # Back button
+        self.assertEqual(get_button_data(buttons[4][0]), b"cart_mode_back")
 
     def test_cart_package_buttons_selected(self):
         buttons = cart_package_buttons(self.config, self.pkgs, selected_codes={"vip1", "vip2"})
-        # 3 package rows + 2 action rows (checkout + reset)
-        self.assertEqual(len(buttons), 5)
+        # 3 package rows + 1 checkout + 1 reset + 1 back = 6 rows
+        self.assertEqual(len(buttons), 6)
         # vip1 checked
         self.assertTrue(buttons[0][0].text.startswith("✅ "))
         # vip2 checked
@@ -70,6 +85,10 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
         reset_btn = buttons[4][0]
         self.assertEqual(get_button_data(reset_btn), b"cart_reset")
         self.assertIn("Reset", reset_btn.text)
+
+        # Back button
+        back_btn = buttons[5][0]
+        self.assertEqual(get_button_data(back_btn), b"cart_mode_back")
 
     def test_qris_caption_multi(self):
         caption = qris_caption_multi(
