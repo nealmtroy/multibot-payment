@@ -661,17 +661,29 @@ class Database:
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE payments SET status = 'paid', error = '', updated_at = now() WHERE inv_id = $1", inv_id)
 
-    async def mark_delivery_error(self, inv_id: str, error: str):
+    async def mark_delivery_error(self, inv_id: str, error: str, retry_delay_seconds: int = 60):
+        next_dt = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=retry_delay_seconds)
         async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE payments SET status = 'delivery_error', error = $1, updated_at = now() WHERE inv_id = $2", str(error), inv_id)
+            await conn.execute(
+                "UPDATE payments SET status = 'delivery_error', error = $1, next_check_at = $2, updated_at = now() WHERE inv_id = $3",
+                str(error),
+                next_dt,
+                inv_id,
+            )
 
     async def mark_delivery_blocked(self, inv_id: str, error: str):
         async with self.pool.acquire() as conn:
             await conn.execute("UPDATE payments SET status = 'delivery_blocked', error = $1, updated_at = now() WHERE inv_id = $2", str(error), inv_id)
 
-    async def mark_invite_error(self, inv_id: str, error: str):
+    async def mark_invite_error(self, inv_id: str, error: str, retry_delay_seconds: int = 60):
+        next_dt = dt.datetime.now(dt.UTC) + dt.timedelta(seconds=retry_delay_seconds)
         async with self.pool.acquire() as conn:
-            await conn.execute("UPDATE payments SET status = 'invite_error', error = $1, updated_at = now() WHERE inv_id = $2", str(error), inv_id)
+            await conn.execute(
+                "UPDATE payments SET status = 'invite_error', error = $1, next_check_at = $2, updated_at = now() WHERE inv_id = $3",
+                str(error),
+                next_dt,
+                inv_id,
+            )
 
     async def mark_payment_pending(self, inv_id: str, attempts: int, next_check_iso: str, error: str = ""):
         from vip_bot.helpers import parse_iso_datetime

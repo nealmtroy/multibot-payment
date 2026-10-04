@@ -240,8 +240,10 @@ def package_buttons(config, store_or_packages, bot_code="default", vip_chat_id=N
     else:
         packages = []
 
+    packages = [p for p in packages if p.get("active", True)]
+
     if not packages:
-        packages = [default_package(config, bot_code=bot_code, vip_chat_id=vip_chat_id)]
+        return []
 
     # Check if explicit row_index is used by any package
     has_explicit_rows = any(int(p.get("row_index") or 0) > 0 for p in packages)
@@ -291,8 +293,10 @@ def cart_package_buttons(config, store_or_packages, selected_codes=None, bot_cod
     else:
         packages = []
 
+    packages = [p for p in packages if p.get("active", True)]
+
     if not packages:
-        packages = [default_package(config, bot_code=bot_code, vip_chat_id=vip_chat_id)]
+        return []
 
     selected = set(selected_codes or [])
 

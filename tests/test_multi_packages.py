@@ -242,6 +242,51 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
         dumped = json.dumps([clean], default=str)
         self.assertIn("vip1", dumped)
 
+    def test_package_buttons_empty_returns_empty_list(self):
+        from vip_bot.messages import package_buttons
+        btns = package_buttons(self.config, [])
+        self.assertEqual(btns, [])
+
+    def test_cart_package_buttons_empty_packages_returns_empty_list(self):
+        from vip_bot.messages import cart_package_buttons
+        btns = cart_package_buttons(self.config, [])
+        self.assertEqual(btns, [])
+
+    async def test_send_package_menu_empty_packages(self):
+        from vip_bot.handlers.user import send_package_menu
+        event = MagicMock()
+        event.respond = AsyncMock()
+        db = MagicMock()
+        db.list_packages = AsyncMock(return_value=[])
+
+        await send_package_menu(event, self.config, db, bot_code="bot1")
+        event.respond.assert_called_once_with("Maaf, belum ada paket VIP yang tersedia.")
+
+    async def test_send_cart_menu_empty_packages(self):
+        from vip_bot.handlers.user import send_cart_menu
+        event = MagicMock()
+        event.respond = AsyncMock()
+        db = MagicMock()
+        db.list_packages = AsyncMock(return_value=[])
+
+        await send_cart_menu(event, self.config, db, bot_code="bot1")
+        event.respond.assert_called_once_with("Maaf, belum ada paket VIP yang tersedia.")
+
+    async def test_create_package_invite_link_missing_chat_id_raises_with_code(self):
+        from vip_bot.helpers import create_package_invite_link
+        client = MagicMock()
+        config = MagicMock()
+        config.vip_chat_id = 0
+        db = MagicMock()
+        db.get_package = AsyncMock(return_value=None)
+        db.get_setting = AsyncMock(return_value=None)
+
+        pkg = {"code": "vip_super", "name": "Super VIP"}
+        with self.assertRaises(RuntimeError) as ctx:
+            await create_package_invite_link(client, config, db, pkg, "INV-123")
+        self.assertIn("vip_super", str(ctx.exception))
+        self.assertIn("VIP chat belum di-set untuk paket vip_super", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

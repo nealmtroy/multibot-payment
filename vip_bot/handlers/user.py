@@ -60,11 +60,22 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
     await db.upsert_user(user, bot_code=bot_code)
     
     if packages:
-        pkgs = list(packages)
+        pkgs = [p for p in packages if p]
     elif package:
         pkgs = [package]
     else:
-        pkgs = [default_package(config, bot_code=bot_code)]
+        pkgs = []
+
+    if not pkgs:
+        text = "Maaf, belum ada paket VIP yang tersedia."
+        if invoice_message:
+            try:
+                await event.client.edit_message(event.chat_id, invoice_message.id, text)
+            except Exception:
+                pass
+        else:
+            await event.respond(text)
+        return
 
     is_multi = len(pkgs) > 1
     total_amount = sum(int(p.get("amount") or 0) for p in pkgs)
@@ -222,8 +233,20 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
 
 async def send_package_menu(event, config, db, message=None, bot_code="default", cart_states=None, **kwargs):
     packages = await db.list_packages(bot_code=bot_code)
+    active_packages = [p for p in packages if p.get("active", True)] if packages else []
+    if not active_packages:
+        text = "Maaf, belum ada paket VIP yang tersedia."
+        if message is None:
+            await event.respond(text)
+        else:
+            try:
+                await event.client.edit_message(event.chat_id, message.id, text, buttons=None)
+            except errors.MessageNotModifiedError:
+                pass
+        return
+
     cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
-    buttons = package_buttons(config, packages, bot_code=bot_code, columns=cols, include_multi_button=True)
+    buttons = package_buttons(config, active_packages, bot_code=bot_code, columns=cols, include_multi_button=True)
     text = "Silakan pilih paket VIP yang ingin kamu beli:"
     if message is None:
         await event.respond(text, buttons=buttons)
@@ -236,11 +259,23 @@ async def send_package_menu(event, config, db, message=None, bot_code="default",
 
 async def send_cart_menu(event, config, db, message=None, bot_code="default", cart_states=None):
     packages = await db.list_packages(bot_code=bot_code)
+    active_packages = [p for p in packages if p.get("active", True)] if packages else []
+    if not active_packages:
+        text = "Maaf, belum ada paket VIP yang tersedia."
+        if message is None:
+            await event.respond(text)
+        else:
+            try:
+                await event.client.edit_message(event.chat_id, message.id, text, buttons=None)
+            except errors.MessageNotModifiedError:
+                pass
+        return
+
     cols = await db.get_package_columns(bot_code=bot_code) if hasattr(db, "get_package_columns") else 1
     states = cart_states if cart_states is not None else USER_CART_STATES
     user_id = event.sender_id
     selected_codes = states.get((user_id, bot_code), set())
-    buttons = cart_package_buttons(config, packages, selected_codes=selected_codes, bot_code=bot_code, columns=cols)
+    buttons = cart_package_buttons(config, active_packages, selected_codes=selected_codes, bot_code=bot_code, columns=cols)
     text = (
         "🛒 <b>Pilih Beberapa Paket VIP</b>\n\n"
         "Centang paket yang ingin kamu beli secara bersamaan:\n"
@@ -418,7 +453,7 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         await handle_referral_start(event, config, db, event.pattern_match.group(1) or "", bot_code=bot_code)
         await event.respond(main_menu_keyboard_text(user), buttons=main_menu_buttons(), parse_mode="html")
 
-    @client.on(events.NewMessage(pattern=r"^/buy$"))
+    @client.on(events.NewMessage(pattern=r"^/(?:buy|paket|vip)$"))
     @private_only
     async def buy_command(event):
         await send_package_menu(event, config, db, bot_code=bot_code)
@@ -475,7 +510,8 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         all_packages = await db.list_packages(bot_code=bot_code)
         active_packages = [p for p in all_packages if p.get("active", True)] if all_packages else []
         if not active_packages:
-            active_packages = [default_package(config, bot_code=bot_code)]
+            await event.answer("Maaf, belum ada paket VIP yang tersedia.", alert=True)
+            return
         await event.answer()
         message = await event.get_message()
         await send_qris(
@@ -557,8 +593,9 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
     async def choose_package(event):
         code = event.pattern_match.group(1).decode()
         package = await db.get_package(code, bot_code=bot_code)
-        if not package:
-            package = default_package(config, bot_code=bot_code)
+        if not package or not package.get("active", True):
+            await event.answer("Maaf, belum ada paket VIP yang tersedia.", alert=True)
+            return
         await event.answer()
         message = await event.get_message()
         await send_qris(

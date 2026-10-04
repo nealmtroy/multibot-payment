@@ -538,9 +538,21 @@ async def delete_qris_message(client, payment):
 
 
 async def create_package_invite_link(client, config, db, package, inv_id):
-    vip_chat_id = int(package.get("vip_chat_id") or 0) or (await runtime_vip_chat_id(config, db))
+    vip_chat_id = int(package.get("vip_chat_id") or 0)
+    pkg_code = package.get("code") or package.get("package_code") or ""
+    bot_code = package.get("bot_code") or "default"
+
+    if not vip_chat_id and pkg_code and hasattr(db, "get_package"):
+        db_pkg = await db.get_package(pkg_code, bot_code=bot_code)
+        if db_pkg and db_pkg.get("vip_chat_id"):
+            vip_chat_id = int(db_pkg["vip_chat_id"])
+
     if not vip_chat_id:
-        raise RuntimeError(f"VIP chat belum di-set untuk paket {package.get('code', '')}. Silakan atur melalui menu Kelola Paket VIP atau Pengaturan.")
+        vip_chat_id = await runtime_vip_chat_id(config, db)
+
+    if not vip_chat_id:
+        err_msg = f"VIP chat belum di-set untuk paket {pkg_code}." if pkg_code else "VIP chat belum di-set."
+        raise RuntimeError(f"{err_msg} Silakan atur melalui menu Kelola Paket VIP atau Pengaturan.")
     invite_hours = int(package.get("invite_expire_hours") or 0) or config.invite_expire_hours
     expires_at = dt.datetime.now(dt.UTC) + dt.timedelta(hours=invite_hours)
     title_name = package.get("name") or package.get("package_name") or "VIP"
