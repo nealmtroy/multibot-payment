@@ -312,6 +312,7 @@ class Database:
                     """
                     INSERT INTO referrals (bot_code, referrer_user_id, referrer_code, invited_user_id, invited_username, invited_full_name, status, created_at, updated_at)
                     VALUES ($1, $2, $3, $4, $5, $6, 'pending', now(), now())
+                    ON CONFLICT (bot_code, invited_user_id) DO NOTHING
                     RETURNING *;
                     """,
                     bot_code,
@@ -321,6 +322,9 @@ class Database:
                     invited_user.username or "",
                     display_name(invited_user),
                 )
+                if not row:
+                    return None, False
+
                 await conn.execute(
                     "UPDATE users SET invited_by_user_id = $1, updated_at = now() WHERE bot_code = $2 AND user_id = $3 AND invited_by_user_id IS NULL",
                     int(referrer["user_id"]),

@@ -169,6 +169,57 @@ class ReferralWithdrawalTest(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_create_referral_if_absent_ignores_concurrent_conflict(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from vip_bot.db import Database
+
+        async def _run():
+            db = Database(pool=MagicMock())
+            db.upsert_user = AsyncMock(return_value={"user_id": 5979728218, "invited_by_user_id": None})
+
+            conn = MagicMock()
+            conn.fetchval = AsyncMock(return_value=None)
+            conn.fetchrow = AsyncMock(return_value=None)
+            conn.execute = AsyncMock()
+            tx_cm = MagicMock()
+            tx_cm.__aenter__ = AsyncMock(return_value=None)
+            tx_cm.__aexit__ = AsyncMock(return_value=False)
+            conn.transaction.return_value = tx_cm
+
+            acquire_cm = MagicMock()
+            acquire_cm.__aenter__ = AsyncMock(return_value=conn)
+            acquire_cm.__aexit__ = AsyncMock(return_value=False)
+            db.pool.acquire.return_value = acquire_cm
+
+            referrer = {"user_id": 1108386981, "referral_code": "ABC123"}
+            invited_user = SimpleNamespace(id=5979728218, username="u", first_name="Test", last_name="")
+            referral, created = await db.create_referral_if_absent(referrer, invited_user, bot_code="boboinaja")
+
+            self.assertIsNone(referral)
+            self.assertFalse(created)
+            sql = conn.fetchrow.call_args[0][0]
+            self.assertIn("ON CONFLICT (bot_code, invited_user_id) DO NOTHING", sql)
+            conn.execute.assert_not_called()
+
+        asyncio.run(_run())
+
+    def test_safe_answer_callback_ignores_query_id_invalid_error(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from telethon.errors.rpcerrorlist import QueryIdInvalidError
+        from vip_bot.helpers import safe_answer_callback
+
+        async def _run():
+            event = MagicMock()
+            event.sender_id = 123
+            event.answer = AsyncMock(side_effect=QueryIdInvalidError(request=None))
+            res = await safe_answer_callback(event)
+            self.assertIsNone(res)
+            event.answer.assert_awaited_once_with()
+
+        asyncio.run(_run())
+
 
 if __name__ == "__main__":
     unittest.main()

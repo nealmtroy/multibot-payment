@@ -16,6 +16,7 @@ from vip_bot.helpers import (
     parse_referral_payload,
     format_referral_code,
     display_name,
+    safe_answer_callback,
     safe_send_user,
     valid_withdrawal_amount,
     parse_withdrawal_amount,
@@ -487,7 +488,8 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
     async def start_withdrawal_flow(event):
         stats = await db.referral_stats(event.sender_id, bot_code=bot_code)
         if stats["balance"] < MIN_WITHDRAWAL_AMOUNT:
-            await event.answer(
+            await safe_answer_callback(
+                event,
                 f"Saldo kamu ({format_rupiah(stats['balance'])}) belum mencapai batas minimal penarikan Rp10.000.",
                 alert=True,
             )
@@ -495,7 +497,7 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
 
         state_key = (event.sender_id, bot_code)
         withdrawal_states[state_key] = {"step": "amount"}
-        await event.answer()
+        await safe_answer_callback(event)
         await event.respond(
             f"Saldo kamu saat ini: <b>{format_rupiah(stats['balance'])}</b>\n\n"
             "Masukkan nominal penarikan saldo (contoh: <code>50000</code>). Minimal Rp10.000:",
@@ -510,9 +512,9 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         all_packages = await db.list_packages(bot_code=bot_code)
         active_packages = [p for p in all_packages if p.get("active", True)] if all_packages else []
         if not active_packages:
-            await event.answer("Maaf, belum ada paket VIP yang tersedia.", alert=True)
+            await safe_answer_callback(event, "Maaf, belum ada paket VIP yang tersedia.", alert=True)
             return
-        await event.answer()
+        await safe_answer_callback(event)
         message = await event.get_message()
         await send_qris(
             event,
@@ -527,7 +529,7 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
 
     @client.on(events.CallbackQuery(data=b"cart_mode_start"))
     async def enter_cart_mode(event):
-        await event.answer()
+        await safe_answer_callback(event)
         message = await event.get_message()
         await send_cart_menu(event, config, db, message=message, bot_code=bot_code, cart_states=states)
 
@@ -535,7 +537,7 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
     async def exit_cart_mode(event):
         state_key = (event.sender_id, bot_code)
         states.pop(state_key, None)
-        await event.answer()
+        await safe_answer_callback(event)
         message = await event.get_message()
         await send_package_menu(event, config, db, message=message, bot_code=bot_code)
 
@@ -548,7 +550,7 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
             selected.remove(code)
         else:
             selected.add(code)
-        await event.answer()
+        await safe_answer_callback(event)
         message = await event.get_message()
         await send_cart_menu(event, config, db, message=message, bot_code=bot_code, cart_states=states)
 
@@ -556,7 +558,7 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
     async def reset_cart(event):
         state_key = (event.sender_id, bot_code)
         states.pop(state_key, None)
-        await event.answer("Pilihan paket direset.")
+        await safe_answer_callback(event, "Pilihan paket direset.")
         message = await event.get_message()
         await send_cart_menu(event, config, db, message=message, bot_code=bot_code, cart_states=states)
 
@@ -565,18 +567,18 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         state_key = (event.sender_id, bot_code)
         selected = states.get(state_key, set())
         if not selected:
-            await event.answer("Pilih minimal 1 paket terlebih dahulu.", alert=True)
+            await safe_answer_callback(event, "Pilih minimal 1 paket terlebih dahulu.", alert=True)
             return
 
         all_packages = await db.list_packages(bot_code=bot_code)
         selected_packages = [p for p in all_packages if p["code"] in selected]
         if not selected_packages:
             states.pop(state_key, None)
-            await event.answer("Paket yang dipilih tidak ditemukan atau sudah tidak aktif.", alert=True)
+            await safe_answer_callback(event, "Paket yang dipilih tidak ditemukan atau sudah tidak aktif.", alert=True)
             return
 
         states.pop(state_key, None)
-        await event.answer()
+        await safe_answer_callback(event)
         message = await event.get_message()
         await send_qris(
             event,
@@ -594,9 +596,9 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         code = event.pattern_match.group(1).decode()
         package = await db.get_package(code, bot_code=bot_code)
         if not package or not package.get("active", True):
-            await event.answer("Maaf, belum ada paket VIP yang tersedia.", alert=True)
+            await safe_answer_callback(event, "Maaf, belum ada paket VIP yang tersedia.", alert=True)
             return
-        await event.answer()
+        await safe_answer_callback(event)
         message = await event.get_message()
         await send_qris(
             event,
@@ -746,7 +748,7 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         state_key = (event.sender_id, bot_code)
         state = withdrawal_states.get(state_key)
         if not state or state.get("step") != "confirm":
-            await event.answer("Sesi penarikan sudah kedaluwarsa.", alert=True)
+            await safe_answer_callback(event, "Sesi penarikan sudah kedaluwarsa.", alert=True)
             return
         user = await event.get_sender()
         amount = state["amount"]
@@ -756,12 +758,12 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
             "account_name": state["account_name"],
         }
         withdrawal_states.pop(state_key, None)
-        await event.answer()
+        await safe_answer_callback(event)
         await create_withdrawal_request(event, config, db, user, amount, details, bot_code=bot_code)
 
     @client.on(events.CallbackQuery(data=b"withdraw_cancel"))
     async def cancel_withdrawal(event):
         state_key = (event.sender_id, bot_code)
         withdrawal_states.pop(state_key, None)
-        await event.answer("Penarikan saldo dibatalkan.")
+        await safe_answer_callback(event, "Penarikan saldo dibatalkan.")
         await event.respond("Penarikan saldo dibatalkan.", buttons=main_menu_buttons())

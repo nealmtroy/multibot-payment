@@ -448,6 +448,17 @@ async def send_log(client, config, db, text, **kwargs):
         LOGGER.warning("Failed to send log message to %s: %s", log_chat_id, exc)
 
 
+async def safe_answer_callback(event, message=None, *, alert=False):
+    """Answer a Telegram callback query safely, ignoring expired/invalid query IDs."""
+    try:
+        if message is None:
+            return await event.answer(alert=alert) if alert else await event.answer()
+        return await event.answer(message, alert=alert)
+    except errors.QueryIdInvalidError:
+        LOGGER.debug("Ignored expired/invalid callback query id for user %s", getattr(event, "sender_id", None))
+        return None
+
+
 async def safe_send_user(client, config, db, user_id, text, **kwargs):
     try:
         await client.send_message(user_id, text, **kwargs)
