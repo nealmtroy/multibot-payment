@@ -8,6 +8,7 @@ from vip_bot.config import WIB, BROADCAST_DISABLED_VALUES
 from vip_bot.helpers import (
     check_payment_sync,
     is_cloudflare_challenge,
+    is_permanent_invite_error,
     is_sociabuzz_timeout,
     parse_iso_datetime,
     next_poll_at,
@@ -109,6 +110,43 @@ async def credit_referral_if_needed(client, config, db, payment):
     )
 
 
+async def _handle_invite_creation_error(client, config, db, payment, exc, pkg=None):
+    """Record invite creation error with backoff and avoid spamming duplicate alerts."""
+    bot_code = payment.get("bot_code") or "default"
+    err_detail = f"Package {pkg.get('code')}: {exc}" if pkg else str(exc)
+    prev_error = (payment.get("error") or "").strip()
+    retry_delay = 1800 if is_permanent_invite_error(exc) else 60
+
+    await db.mark_invite_error(payment["inv_id"], err_detail, retry_delay_seconds=retry_delay)
+
+    if err_detail.strip() == prev_error:
+        LOGGER.warning(
+            "Invite creation still failing for %s (next retry in %ds): %s",
+            payment["inv_id"],
+            retry_delay,
+            err_detail,
+        )
+        return
+
+    if pkg:
+        LOGGER.exception("Failed to create invite link for package %s in payment %s", pkg.get("code"), payment["inv_id"])
+        log_msg = (
+            f"<b>[{html.escape(bot_code)}] Multi-Invite creation error</b>\n"
+            f"Invoice: <code>{html.escape(payment.get('public_invoice_id') or payment['inv_id'])}</code>\n"
+            f"Package: <code>{html.escape(pkg.get('code') or '')}</code>\n"
+            f"Error: <code>{html.escape(str(exc))}</code>"
+        )
+    else:
+        LOGGER.exception("Failed to create invite link for %s", payment["inv_id"])
+        log_msg = (
+            f"<b>[{html.escape(bot_code)}] Invite creation error</b>\n"
+            f"Invoice: <code>{html.escape(payment.get('public_invoice_id') or payment['inv_id'])}</code>\n"
+            f"Internal invoice: <code>{html.escape(payment['inv_id'])}</code>\n"
+            f"Error: <code>{html.escape(str(exc))}</code>"
+        )
+    await send_log(client, config, db, log_msg)
+
+
 async def process_paid_payment(client, config, db, payment):
     import json
     bot_code = payment.get("bot_code") or "default"
@@ -156,24 +194,14 @@ async def process_paid_payment(client, config, db, payment):
         for pkg in packages:
             if not pkg.get("invite_link"):
                 try:
-                    link, exp_iso = await create_package_invite_link(client, config, db, pkg, payment["inv_id"])
+                    link, exp_iso = await create_package_invite_link(
+                        client, config, db, pkg, payment["inv_id"], bot_code=bot_code
+                    )
                     pkg["invite_link"] = link
                     pkg["invite_expires_at"] = exp_iso
                 except Exception as exc:
-                    LOGGER.exception("Failed to create invite link for package %s in payment %s", pkg.get("code"), payment["inv_id"])
                     await db.update_payment_packages(payment["inv_id"], packages)
-                    await db.mark_invite_error(payment["inv_id"], f"Package {pkg.get('code')}: {exc}")
-                    await send_log(
-                        client,
-                        config,
-                        db,
-                        (
-                            f"<b>[{html.escape(bot_code)}] Multi-Invite creation error</b>\n"
-                            f"Invoice: <code>{html.escape(payment.get('public_invoice_id') or payment['inv_id'])}</code>\n"
-                            f"Package: <code>{html.escape(pkg.get('code') or '')}</code>\n"
-                            f"Error: <code>{html.escape(str(exc))}</code>"
-                        ),
-                    )
+                    await _handle_invite_creation_error(client, config, db, payment, exc, pkg=pkg)
                     return
 
         # Save all generated links into packages_json and invite_link column
@@ -257,19 +285,7 @@ async def process_paid_payment(client, config, db, payment):
         try:
             invite_link, invite_expires_at = await create_invite_link(client, config, db, payment)
         except Exception as exc:
-            LOGGER.exception("Failed to create invite link for %s", payment["inv_id"])
-            await db.mark_invite_error(payment["inv_id"], str(exc))
-            await send_log(
-                client,
-                config,
-                db,
-                (
-                    f"<b>[{html.escape(bot_code)}] Invite creation error</b>\n"
-                    f"Invoice: <code>{html.escape(payment.get('public_invoice_id') or payment['inv_id'])}</code>\n"
-                    f"Internal invoice: <code>{html.escape(payment['inv_id'])}</code>\n"
-                    f"Error: <code>{html.escape(str(exc))}</code>"
-                ),
-            )
+            await _handle_invite_creation_error(client, config, db, payment, exc)
             return
         if not (await db.mark_delivery_processing(payment["inv_id"], invite_link, invite_expires_at)):
             return

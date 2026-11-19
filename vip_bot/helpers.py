@@ -3,6 +3,7 @@ import hashlib
 import asyncio
 import datetime as dt
 import html
+import inspect
 import io
 import json
 import logging
@@ -261,6 +262,28 @@ def is_user_unreachable_error(exc):
 
 def is_sociabuzz_timeout(exc):
     return isinstance(exc, (requests.Timeout, TimeoutError)) or "timed out" in str(exc).lower()
+
+
+def is_permanent_invite_error(exc):
+    """Return True when invite link creation failed due to non-transient channel or permission errors."""
+    perm_types = tuple(
+        t for t in (
+            getattr(errors, "ChannelPrivateError", None),
+            getattr(errors, "ChannelInvalidError", None),
+            getattr(errors, "ChatAdminRequiredError", None),
+            getattr(errors, "ChatWriteForbiddenError", None),
+            getattr(errors, "PeerIdInvalidError", None),
+        )
+        if t is not None
+    )
+    if perm_types and isinstance(exc, perm_types):
+        return True
+    msg = str(exc).lower()
+    return (
+        "channel specified is private" in msg
+        or "chat_admin_required" in msg
+        or "vip chat belum di-set" in msg
+    )
 
 
 def entities_to_json(entities):
@@ -548,14 +571,16 @@ async def delete_qris_message(client, payment):
         pass
 
 
-async def create_package_invite_link(client, config, db, package, inv_id):
+async def create_package_invite_link(client, config, db, package, inv_id, bot_code=None):
     vip_chat_id = int(package.get("vip_chat_id") or 0)
     pkg_code = package.get("code") or package.get("package_code") or ""
-    bot_code = package.get("bot_code") or "default"
+    resolved_bot_code = bot_code or package.get("bot_code") or "default"
 
-    if not vip_chat_id and pkg_code and hasattr(db, "get_package"):
-        db_pkg = await db.get_package(pkg_code, bot_code=bot_code)
-        if db_pkg and db_pkg.get("vip_chat_id"):
+    # Prefer the latest package vip_chat_id in DB so updating a channel unblocks stuck invite_error payments
+    if pkg_code and hasattr(db, "get_package"):
+        res = db.get_package(pkg_code, bot_code=resolved_bot_code)
+        db_pkg = await res if inspect.isawaitable(res) else res
+        if isinstance(db_pkg, dict) and db_pkg.get("vip_chat_id"):
             vip_chat_id = int(db_pkg["vip_chat_id"])
 
     if not vip_chat_id:
@@ -579,7 +604,14 @@ async def create_package_invite_link(client, config, db, package, inv_id):
 
 
 async def create_invite_link(client, config, db, payment):
-    return await create_package_invite_link(client, config, db, payment, payment.get("inv_id", ""))
+    return await create_package_invite_link(
+        client,
+        config,
+        db,
+        payment,
+        payment.get("inv_id", ""),
+        bot_code=payment.get("bot_code") or "default",
+    )
 
 
 def serialize_package_dict(pkg):

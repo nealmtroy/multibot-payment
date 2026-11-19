@@ -287,6 +287,63 @@ class TestMultiPackageFeatures(unittest.IsolatedAsyncioTestCase):
         self.assertIn("vip_super", str(ctx.exception))
         self.assertIn("VIP chat belum di-set untuk paket vip_super", str(ctx.exception))
 
+    async def test_create_package_invite_link_prefers_latest_db_vip_chat_id(self):
+        client = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.link = "https://t.me/+updated_link"
+        client.return_value = mock_result
+
+        db = MagicMock()
+        db.get_package = AsyncMock(return_value={"code": "reguler", "vip_chat_id": -100999888777})
+
+        pkg = {"code": "reguler", "name": "VIP Reguler", "vip_chat_id": -100111222333, "invite_expire_hours": 12}
+        link, _ = await create_package_invite_link(client, self.config, db, pkg, "INV-456", bot_code="boboinaja")
+
+        self.assertEqual(link, "https://t.me/+updated_link")
+        db.get_package.assert_awaited_once_with("reguler", bot_code="boboinaja")
+        req = client.call_args[0][0]
+        self.assertEqual(req.peer, -100999888777)
+
+    async def test_process_paid_payment_permanent_invite_error_backoff_and_no_log_spam(self):
+        from telethon.errors.rpcerrorlist import ChannelPrivateError
+
+        client = AsyncMock()
+        client.side_effect = ChannelPrivateError(request=None)
+
+        db = MagicMock()
+        db.claim_paid_processing = AsyncMock(return_value=True)
+        db.get_package = AsyncMock(return_value=None)
+        db.mark_invite_error = AsyncMock()
+
+        payment = {
+            "inv_id": "INV-PERM-1",
+            "bot_code": "boboinaja",
+            "user_id": 12345,
+            "package_code": "reguler",
+            "package_name": "VIP Reguler",
+            "vip_chat_id": -1003906637568,
+            "status": "pending",
+            "error": "",
+        }
+
+        with patch("vip_bot.loops.send_log", new_callable=AsyncMock) as mock_log:
+            await process_paid_payment(client, self.config, db, payment)
+            db.mark_invite_error.assert_awaited_once()
+            self.assertEqual(db.mark_invite_error.call_args.kwargs.get("retry_delay_seconds"), 1800)
+            mock_log.assert_awaited_once()
+
+            # Second retry with identical error should not spam send_log again
+            err_msg = db.mark_invite_error.call_args[0][1]
+            payment["status"] = "invite_error"
+            payment["error"] = err_msg
+            db.mark_invite_error.reset_mock()
+            mock_log.reset_mock()
+
+            await process_paid_payment(client, self.config, db, payment)
+            db.mark_invite_error.assert_awaited_once()
+            self.assertEqual(db.mark_invite_error.call_args.kwargs.get("retry_delay_seconds"), 1800)
+            mock_log.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()
