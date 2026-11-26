@@ -252,9 +252,15 @@ def is_user_deactivated_error(exc):
 
 
 def is_user_unreachable_error(exc):
+    """Return True when Telegram reports the target peer/user ID cannot be reached."""
     msg = str(exc).lower()
+    peer_invalid_err = getattr(errors, "PeerIdInvalidError", None)
+    user_invalid_err = getattr(errors, "UserIdInvalidError", None)
+    unreachable_types = tuple(t for t in (peer_invalid_err, user_invalid_err) if t is not None)
     return (
-        (isinstance(exc, ValueError) and "could not find the input entity" in msg)
+        bool(unreachable_types and isinstance(exc, unreachable_types))
+        or (isinstance(exc, ValueError) and "could not find the input entity" in msg)
+        or "an invalid peer was used" in msg
         or "user_id_invalid" in msg
         or "peer_id_invalid" in msg
     )

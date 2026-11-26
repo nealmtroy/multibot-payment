@@ -509,9 +509,11 @@ async def send_broadcast_batch(
 
         async with semaphore:
             await pause_event.wait()
+            attempted = False
             status = "error"
             for attempt in range(2):
                 try:
+                    attempted = True
                     status = await send_broadcast_to_user(
                         client, db, broadcast_message, target, uploaded_media=uploaded_media
                     )
@@ -521,12 +523,14 @@ async def send_broadcast_batch(
                     if wait_sec > 300:
                         LOGGER.error("Fatal FloodWait of %ds detected on bot [%s]. Halting batch.", wait_sec, bot_code)
                         fatal_flood = True
+                        attempted = False
                         status = "error"
                         break
                     LOGGER.warning("FloodWait of %ds on bot [%s]. Pausing all broadcast workers...", wait_sec, bot_code)
                     pause_event.clear()
                     await asyncio.sleep(wait_sec + 1)
                     pause_event.set()
+                    attempted = False
                     status = "error"
                 except Exception as exc:
                     LOGGER.warning("Error broadcasting to user %s: %s", uid, exc)
@@ -538,7 +542,9 @@ async def send_broadcast_batch(
             else:
                 totals["error"] += 1
 
-            if status == "sent" and not is_test:
+            # Mark every completed delivery attempt (not just "sent") so failing/unreachable
+            # users are not re-fetched endlessly on the next pagination iteration.
+            if attempted and status in {"sent", "blocked", "deactivated", "unreachable", "error"} and not is_test:
                 try:
                     await db.mark_user_broadcasted(uid, bot_code=bot_code)
                 except Exception:
@@ -586,6 +592,8 @@ async def _process_single_bot_broadcast(bot_manager_or_client, config, db, b_cod
         concurrency = min(config.qris_create_concurrency, 3)
 
         LOGGER.info("Starting broadcast pagination loop for bot [%s]...", b_code)
+        seen_uids: set[int] = set()
+        halted = False
         while True:
             batch_targets = await db.get_broadcast_targets(
                 bot_code=b_code, before_iso=today_start_iso, limit=200
@@ -593,11 +601,26 @@ async def _process_single_bot_broadcast(bot_manager_or_client, config, db, b_cod
             if not batch_targets:
                 break
 
+            unseen_targets = []
+            for t in batch_targets:
+                uid = int(t["user_id"]) if isinstance(t, dict) else int(t)
+                if uid not in seen_uids:
+                    seen_uids.add(uid)
+                    unseen_targets.append(t)
+
+            if not unseen_targets:
+                LOGGER.warning(
+                    "Breaking broadcast pagination loop for bot [%s]: %d targets already seen in current run.",
+                    b_code,
+                    len(batch_targets),
+                )
+                break
+
             totals = await send_broadcast_batch(
                 client,
                 db,
                 msg,
-                batch_targets,
+                unseen_targets,
                 concurrency=concurrency,
                 bot_code=b_code,
                 uploaded_media=media_handle,
@@ -607,6 +630,7 @@ async def _process_single_bot_broadcast(bot_manager_or_client, config, db, b_cod
                 grand_totals[k] += totals.get(k, 0)
 
             if totals.get("fatal_flood"):
+                halted = True
                 LOGGER.error("Halting remaining broadcast for bot [%s] due to fatal FloodWait.", b_code)
                 break
 
@@ -629,7 +653,8 @@ async def _process_single_bot_broadcast(bot_manager_or_client, config, db, b_cod
                     f"• Gagal: <b>{grand_totals.get('error', 0)}</b>"
                 ),
             )
-        await db.set_last_broadcast_date(today_str, bot_code=b_code)
+        if not halted:
+            await db.set_last_broadcast_date(today_str, bot_code=b_code)
     except Exception as exc:
         LOGGER.exception("Error processing broadcast for bot [%s]: %s", b_code, exc)
     finally:

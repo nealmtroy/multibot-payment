@@ -11,6 +11,8 @@ from vip_bot.helpers import (
     telegram_user_link,
     is_cloudflare_challenge,
     is_sociabuzz_timeout,
+    is_user_blocked_error,
+    is_user_deactivated_error,
     format_button_amount,
     format_rupiah,
     parse_referral_payload,
@@ -40,18 +42,36 @@ USER_CART_STATES = {}
 
 
 def private_only(handler):
+    """Restrict a handler to private chats and ignore blocked/deactivated users cleanly."""
     async def wrapped(event):
         if not event.is_private:
             return
-        await handler(event)
+        try:
+            await handler(event)
+        except Exception as exc:
+            if is_user_blocked_error(exc) or is_user_deactivated_error(exc):
+                LOGGER.info("Ignored blocked/deactivated user %s in private handler", getattr(event, "sender_id", None))
+                return
+            raise
     return wrapped
+
+
+async def safe_respond(event, *args, **kwargs):
+    """Respond to a user event while ignoring blocked/deactivated user errors."""
+    try:
+        return await event.respond(*args, **kwargs)
+    except Exception as exc:
+        if is_user_blocked_error(exc) or is_user_deactivated_error(exc):
+            LOGGER.info("Ignored blocked/deactivated user %s when responding", getattr(event, "sender_id", None))
+            return None
+        raise
 
 
 async def send_qris(event, config, db, qris_semaphore, user_locks, package=None, packages=None, invoice_message=None, bot_code="default"):
     user = await event.get_sender()
     lock = user_locks.setdefault((user.id, bot_code), asyncio.Lock())
     if lock.locked():
-        await event.respond("QRIS kamu sedang dibuat. Tunggu beberapa detik, jangan klik berulang.")
+        await safe_respond(event, "QRIS kamu sedang dibuat. Tunggu beberapa detik, jangan klik berulang.")
         return
     async with lock:
         await send_qris_locked(event, config, db, qris_semaphore, user, package=package, packages=packages, invoice_message=invoice_message, bot_code=bot_code)
@@ -75,7 +95,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
             except Exception:
                 pass
         else:
-            await event.respond(text)
+            await safe_respond(event, text)
         return
 
     is_multi = len(pkgs) > 1
@@ -84,13 +104,16 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
 
     pending = await db.latest_pending_for_user(user.id, bot_code=bot_code)
     if pending:
-        await event.respond(
-            "Masih ada pembayaran yang sedang dicek. Tunggu statusnya selesai dulu sebelum membuat QRIS baru."
+        await safe_respond(
+            event,
+            "Masih ada pembayaran yang sedang dicek. Tunggu statusnya selesai dulu sebelum membuat QRIS baru.",
         )
         return
 
     if invoice_message is None:
-        invoice_message = await event.respond("⏳ Membuat QRIS...")
+        invoice_message = await safe_respond(event, "⏳ Membuat QRIS...")
+        if invoice_message is None:
+            return
     else:
         try:
             await event.client.edit_message(event.chat_id, invoice_message.id, "⏳ Membuat QRIS...")
@@ -197,7 +220,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
         except Exception:
             LOGGER.warning("Failed to delete invoice message after create error", exc_info=True)
         if is_cloudflare_challenge(exc):
-            await event.respond("QRIS belum bisa dibuat karena sistem sedang membatasi request. Coba lagi beberapa menit lagi.")
+            await safe_respond(event, "QRIS belum bisa dibuat karena sistem sedang membatasi request. Coba lagi beberapa menit lagi.")
             await send_log(
                 event.client,
                 config,
@@ -210,7 +233,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
             )
             return
         if is_sociabuzz_timeout(exc):
-            await event.respond("QRIS lagi lambat dibuat. Coba lagi sebentar lagi ya.")
+            await safe_respond(event, "QRIS lagi lambat dibuat. Coba lagi sebentar lagi ya.")
             await send_log(
                 event.client,
                 config,
@@ -223,7 +246,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
                 ),
             )
             return
-        await event.respond("Gagal membuat QRIS. Coba lagi beberapa saat lagi.")
+        await safe_respond(event, "Gagal membuat QRIS. Coba lagi beberapa saat lagi.")
         await send_log(
             event.client,
             config,
@@ -434,7 +457,8 @@ async def create_withdrawal_request(event, config, db, user, amount, details, bo
             ]
         ],
     )
-    await event.respond(
+    await safe_respond(
+        event,
         "Pengajuan penarikan saldo berhasil. Mohon tunggu 1x24 jam untuk diproses oleh admin.",
         buttons=main_menu_buttons(),
     )
@@ -498,7 +522,8 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         state_key = (event.sender_id, bot_code)
         withdrawal_states[state_key] = {"step": "amount"}
         await safe_answer_callback(event)
-        await event.respond(
+        await safe_respond(
+            event,
             f"Saldo kamu saat ini: <b>{format_rupiah(stats['balance'])}</b>\n\n"
             "Masukkan nominal penarikan saldo (contoh: <code>50000</code>). Minimal Rp10.000:",
             parse_mode="html",
@@ -766,4 +791,4 @@ def register_user_handlers(client, config, db, qris_semaphore, user_locks, withd
         state_key = (event.sender_id, bot_code)
         withdrawal_states.pop(state_key, None)
         await safe_answer_callback(event, "Penarikan saldo dibatalkan.")
-        await event.respond("Penarikan saldo dibatalkan.", buttons=main_menu_buttons())
+        await safe_respond(event, "Penarikan saldo dibatalkan.", buttons=main_menu_buttons())

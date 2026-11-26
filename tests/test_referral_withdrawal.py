@@ -220,6 +220,102 @@ class ReferralWithdrawalTest(unittest.TestCase):
 
         asyncio.run(_run())
 
+    def test_is_user_unreachable_error_matches_peer_id_invalid(self):
+        from telethon.errors.rpcerrorlist import PeerIdInvalidError
+        from vip_bot.helpers import is_user_unreachable_error
+
+        self.assertTrue(is_user_unreachable_error(PeerIdInvalidError(request=None)))
+        self.assertTrue(is_user_unreachable_error(ValueError("Could not find the input entity for PeerUser(user_id=1)")))
+        self.assertTrue(is_user_unreachable_error(RuntimeError("An invalid Peer was used. Make sure to pass the right peer type")))
+        self.assertFalse(is_user_unreachable_error(RuntimeError("Some unrelated error")))
+
+    def test_send_broadcast_batch_marks_failed_and_unreachable_targets_to_prevent_loops(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from vip_bot.loops import send_broadcast_batch
+
+        async def _run():
+            db = MagicMock()
+            db.mark_user_broadcasted = AsyncMock()
+            client = MagicMock()
+            targets = [
+                {"user_id": 1, "access_hash": 10},
+                {"user_id": 2, "access_hash": 20},
+                {"user_id": 3, "access_hash": 30},
+                {"user_id": 4, "access_hash": 40},
+                {"user_id": 5, "access_hash": 50},
+            ]
+            statuses = {1: "sent", 2: "blocked", 3: "deactivated", 4: "unreachable", 5: "error"}
+
+            async def fake_send(_client, _db, _msg, target, uploaded_media=None):
+                return statuses[target["user_id"]]
+
+            with patch("vip_bot.loops.send_broadcast_to_user", side_effect=fake_send):
+                totals = await send_broadcast_batch(client, db, {"message_text": "hi"}, targets, concurrency=2, bot_code="boboinaja")
+
+            self.assertEqual(totals, {"sent": 1, "blocked": 1, "deactivated": 1, "unreachable": 1, "error": 1})
+            marked_uids = sorted(call.args[0] for call in db.mark_user_broadcasted.await_args_list)
+            self.assertEqual(marked_uids, [1, 2, 3, 4, 5])
+
+        asyncio.run(_run())
+
+    def test_process_single_bot_broadcast_breaks_if_seen_targets_repeat(self):
+        import asyncio
+        import datetime as dt
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from vip_bot.config import WIB
+        from vip_bot.loops import _process_single_bot_broadcast, active_broadcast_tasks
+
+        async def _run():
+            db = MagicMock()
+            db.get_active_broadcast_message = AsyncMock(return_value={"message_text": "promo"})
+            # Simulate DB returning the same target endlessly despite mark calls
+            db.get_broadcast_targets = AsyncMock(return_value=[{"user_id": 7620694664, "access_hash": 123}])
+            db.mark_user_broadcasted = AsyncMock()
+            db.set_last_broadcast_date = AsyncMock()
+
+            client = MagicMock()
+            client.is_connected.return_value = True
+            config = MagicMock()
+            config.qris_create_concurrency = 3
+
+            active_broadcast_tasks.add("boboinaja")
+            with patch("vip_bot.loops.send_broadcast_to_user", AsyncMock(return_value="unreachable")), \
+                 patch("vip_bot.loops.send_log", AsyncMock()):
+                await _process_single_bot_broadcast(client, config, db, "boboinaja", "22:00", "2026-11-26", dt.datetime.now(WIB))
+
+            self.assertEqual(db.get_broadcast_targets.await_count, 2)
+            db.set_last_broadcast_date.assert_awaited_once_with("2026-11-26", bot_code="boboinaja")
+            self.assertNotIn("boboinaja", active_broadcast_tasks)
+
+        asyncio.run(_run())
+
+    def test_private_only_ignores_user_is_blocked_error(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from telethon.errors.rpcerrorlist import UserIsBlockedError
+        from vip_bot.handlers.user import private_only
+
+        async def _run():
+            @private_only
+            async def sample_handler(event):
+                await event.respond("hello")
+
+            event = MagicMock()
+            event.is_private = True
+            event.sender_id = 999
+            event.respond = AsyncMock(side_effect=UserIsBlockedError(request=None))
+            await sample_handler(event)
+
+            event2 = MagicMock()
+            event2.is_private = True
+            event2.sender_id = 999
+            event2.respond = AsyncMock(side_effect=RuntimeError("unexpected failure"))
+            with self.assertRaises(RuntimeError):
+                await sample_handler(event2)
+
+        asyncio.run(_run())
+
 
 if __name__ == "__main__":
     unittest.main()
