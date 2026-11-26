@@ -23,6 +23,14 @@ from vip_bot.handlers.admin import build_runtime_settings_panel
 from vip_bot.loops import poll_once
 
 
+def get_button_data(btn):
+    if hasattr(btn, "data"):
+        return btn.data
+    if hasattr(btn, "type") and hasattr(btn.type, "data"):
+        return btn.type.data
+    return getattr(btn, "_bytes", None)
+
+
 class FakeResponse:
     def __init__(self, status_code=200, text="", json_data=None):
         self.status_code = status_code
@@ -212,9 +220,9 @@ class TestSaweriaGateway(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sb_creator", text)
         self.assertEqual(buttons[0][0].text, "SOCIABUZZ")
         self.assertEqual(buttons[0][1].text, "SAWERIA ✅")
-        self.assertEqual(buttons[0][0].data, b"adm_gw_set:sociabuzz")
-        self.assertEqual(buttons[0][1].data, b"adm_gw_set:saweria")
-        self.assertEqual(buttons[1][1].data, b"adm_cfg:saweria_username")
+        self.assertEqual(get_button_data(buttons[0][0]), b"adm_gw_set:sociabuzz")
+        self.assertEqual(get_button_data(buttons[0][1]), b"adm_gw_set:saweria")
+        self.assertEqual(get_button_data(buttons[1][1]), b"adm_cfg:saweria_username")
 
     async def test_poll_once_uses_payment_gateway_per_row(self):
         client = MagicMock()
