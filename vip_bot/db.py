@@ -55,6 +55,10 @@ class Database:
                 await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS packages_json TEXT NOT NULL DEFAULT '[]';")
             except Exception as e:
                 LOGGER.warning("Could not run payments packages_json migration: %s", e)
+            try:
+                await conn.execute("ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_gateway TEXT NOT NULL DEFAULT 'sociabuzz';")
+            except Exception as e:
+                LOGGER.warning("Could not run payments payment_gateway migration: %s", e)
         LOGGER.info("PostgreSQL schema initialized successfully.")
 
     # -------------------------------------------------------------------------
@@ -509,6 +513,7 @@ class Database:
         packages: list = None,
         referral: dict = None,
         bot_code: str = "default",
+        payment_gateway: str = "sociabuzz",
     ):
         import json
         from vip_bot.helpers import parse_iso_datetime, next_poll_at, display_name, serialize_package_dict
@@ -549,10 +554,10 @@ class Database:
             bot_code, user_id, username, full_name, package_code, package_name, package_amount,
             vip_chat_id, invite_expire_hours, public_invoice_id, order_id, payment_url, inv_id,
             amount, status, buyer_name, buyer_email, qris_amount, qris_expires, qris_chat_id,
-            qris_message_id, next_check_at, poll_attempts, referral_id, referrer_user_id, packages_json, created_at, updated_at
+            qris_message_id, next_check_at, poll_attempts, referral_id, referrer_user_id, packages_json, payment_gateway, created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'pending',
-            $15, $16, $17, $18, $19, $20, $21, 0, $22, $23, $24, now(), now()
+            $15, $16, $17, $18, $19, $20, $21, 0, $22, $23, $24, $25, now(), now()
         );
         """
         async with self.pool.acquire() as conn:
@@ -582,6 +587,7 @@ class Database:
                 referral.get("id") if referral else None,
                 referral.get("referrer_user_id") if referral else None,
                 packages_json_str,
+                (payment_gateway or "sociabuzz").strip().lower(),
             )
 
     async def latest_pending_for_user(self, user_id: int, bot_code: str = "default") -> dict | None:

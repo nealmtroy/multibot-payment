@@ -1,14 +1,19 @@
-import json
+import atexit
+import concurrent.futures
 import io
+import json
+import queue
 import re
+import threading
 import time
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
-import requests
+from camoufox.sync_api import Camoufox
 
 
 BASE_URL = "https://sociabuzz.com"
+_SHUTDOWN_SENTINEL = object()
 
 
 class SociaBuzzError(RuntimeError):
@@ -19,20 +24,377 @@ def noop_log(_message):
     pass
 
 
-def new_session(cookie_header=""):
-    session = requests.Session()
-    session.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
-            ),
+def _parse_cookie_header(cookie_header):
+    cookies = {}
+    for part in (cookie_header or "").split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        if name:
+            cookies[name] = value.strip()
+    return cookies
+
+
+def _is_cloudflare_html(title, body):
+    title_l = (title or "").lower()
+    body_l = (body or "").lower()
+    return "just a moment" in title_l or "challenges.cloudflare.com" in body_l or "cf-browser-verification" in body_l
+
+
+class CamoufoxResponse:
+    def __init__(self, status_code, text="", content=b"", headers=None, url=""):
+        self.status_code = int(status_code)
+        self.text = text or ""
+        if content:
+            self.content = content
+        else:
+            self.content = self.text.encode("utf-8")
+        self.headers = headers or {}
+        self.url = url
+
+    def json(self):
+        return json.loads(self.text)
+
+
+class _CamoufoxWorker:
+    """Dedicated single-thread actor running a warm headless Camoufox browser."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._queue = None
+        self._thread = None
+        self._cm = None
+        self._browser = None
+        self._contexts = {}
+        self._next_ctx_id = 1
+
+    def _ensure_started(self):
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._queue = queue.Queue()
+            self._thread = threading.Thread(
+                target=self._run_loop,
+                name="camoufox-sociabuzz-worker",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def _start_browser(self):
+        if self._browser is not None:
+            try:
+                if self._browser.is_connected():
+                    return
+            except Exception:
+                pass
+            self._stop_browser()
+        self._cm = Camoufox(headless=True)
+        self._browser = self._cm.__enter__()
+
+    def _stop_browser(self):
+        for entry in list(self._contexts.values()):
+            try:
+                entry["context"].close()
+            except Exception:
+                pass
+        self._contexts.clear()
+        if self._cm is not None:
+            try:
+                self._cm.__exit__(None, None, None)
+            except Exception:
+                pass
+        self._cm = None
+        self._browser = None
+
+    def _run_loop(self):
+        try:
+            while True:
+                item = self._queue.get()
+                if item is _SHUTDOWN_SENTINEL:
+                    break
+                fn, fut = item
+                if fut.set_running_or_notify_cancel():
+                    try:
+                        res = fn()
+                        fut.set_result(res)
+                    except BaseException as exc:
+                        fut.set_exception(exc)
+        finally:
+            self._stop_browser()
+
+    def submit(self, fn, timeout=60):
+        self._ensure_started()
+        fut = concurrent.futures.Future()
+        self._queue.put((fn, fut))
+        try:
+            return fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as exc:
+            raise TimeoutError(f"Camoufox operation timed out after {timeout}s") from exc
+
+    def create_context(self, cookie_header="", extra_headers=None):
+        def _op():
+            self._start_browser()
+            ctx = self._browser.new_context(locale="en-US")
+            if extra_headers:
+                ctx.set_extra_http_headers(extra_headers)
+            parsed = _parse_cookie_header(cookie_header)
+            if parsed:
+                ctx.add_cookies(
+                    [
+                        {
+                            "name": k,
+                            "value": v,
+                            "domain": ".sociabuzz.com",
+                            "path": "/",
+                        }
+                        for k, v in parsed.items()
+                    ]
+                )
+            page = ctx.new_page()
+            ctx_id = self._next_ctx_id
+            self._next_ctx_id += 1
+            self._contexts[ctx_id] = {"context": ctx, "page": page}
+            return ctx_id
+
+        return self.submit(_op, timeout=60)
+
+    def close_context(self, ctx_id, wait=True):
+        if not ctx_id:
+            return
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                return
+
+        def _op():
+            entry = self._contexts.pop(ctx_id, None)
+            if entry:
+                try:
+                    entry["context"].close()
+                except Exception:
+                    pass
+
+        if wait:
+            try:
+                self.submit(_op, timeout=15)
+            except Exception:
+                pass
+        else:
+            fut = concurrent.futures.Future()
+            self._queue.put((_op, fut))
+
+    def get_cookies(self, ctx_id):
+        def _op():
+            entry = self._contexts.get(ctx_id)
+            if not entry:
+                return {}
+            return {c["name"]: c["value"] for c in entry["context"].cookies()}
+
+        return self.submit(_op, timeout=15)
+
+    def perform_request(self, ctx_id, method, url, headers=None, data=None, json_body=None, timeout=30):
+        def _op():
+            entry = self._contexts.get(ctx_id)
+            if not entry:
+                raise SociaBuzzError("Camoufox context is closed.")
+            ctx = entry["context"]
+            page = entry["page"]
+            method_u = (method or "GET").upper()
+            req_headers = dict(headers or {})
+            timeout_ms = max(1000, int((timeout or 30) * 1000))
+
+            parsed_url = urlparse(url)
+            is_same_origin = (parsed_url.netloc or "").lower().endswith("sociabuzz.com")
+            is_ajax = any(k.lower() == "x-requested-with" for k in req_headers) or json_body is not None or data is not None
+            is_pending_check = "/payment/pending" in parsed_url.path
+
+            try:
+                if is_same_origin and is_pending_check and method_u == "GET":
+                    resp = ctx.request.get(url, headers=req_headers or None, timeout=timeout_ms)
+                    text = resp.text()
+                    if resp.status == 403 and _is_cloudflare_html("", text):
+                        return self._goto_page(page, url, timeout_ms)
+                    return CamoufoxResponse(
+                        status_code=resp.status,
+                        text=text,
+                        content=resp.body(),
+                        headers=dict(resp.headers),
+                        url=resp.url,
+                    )
+
+                if is_same_origin and method_u == "GET" and not is_ajax and "/payment/pay/setting" not in parsed_url.path:
+                    return self._goto_page(page, url, timeout_ms)
+
+                if is_same_origin:
+                    if not (page.url or "").startswith(BASE_URL):
+                        self._goto_page(page, BASE_URL, timeout_ms)
+
+                    fetch_headers = {
+                        k: v
+                        for k, v in req_headers.items()
+                        if k.lower() not in {"origin", "referer", "host", "content-length", "cookie"}
+                    }
+                    body_str = None
+                    if json_body is not None:
+                        body_str = json.dumps(json_body)
+                        if not any(k.lower() == "content-type" for k in fetch_headers):
+                            fetch_headers["Content-Type"] = "application/json"
+                    elif data is not None:
+                        body_str = urlencode(data) if isinstance(data, dict) else str(data)
+                        if not any(k.lower() == "content-type" for k in fetch_headers):
+                            fetch_headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+
+                    result = page.evaluate(
+                        """async ({ url, method, headers, body }) => {
+                            const opts = { method, headers, credentials: 'include' };
+                            if (body !== null && body !== undefined && method !== 'GET' && method !== 'HEAD') {
+                                opts.body = body;
+                            }
+                            const resp = await fetch(url, opts);
+                            const text = await resp.text();
+                            const respHeaders = {};
+                            resp.headers.forEach((v, k) => { respHeaders[k] = v; });
+                            return { status: resp.status, text, headers: respHeaders, url: resp.url };
+                        }""",
+                        {
+                            "url": url,
+                            "method": method_u,
+                            "headers": fetch_headers,
+                            "body": body_str,
+                        },
+                    )
+                    return CamoufoxResponse(
+                        status_code=result["status"],
+                        text=result["text"],
+                        headers=result.get("headers") or {},
+                        url=result.get("url") or url,
+                    )
+
+                fetch_kwargs = {"method": method_u, "timeout": timeout_ms}
+                if req_headers:
+                    fetch_kwargs["headers"] = req_headers
+                if json_body is not None:
+                    fetch_kwargs["data"] = json_body
+                elif data is not None:
+                    fetch_kwargs["form"] = data
+                resp = ctx.request.fetch(url, **fetch_kwargs)
+                raw_bytes = resp.body()
+                return CamoufoxResponse(
+                    status_code=resp.status,
+                    text=raw_bytes.decode("utf-8", errors="replace"),
+                    content=raw_bytes,
+                    headers=dict(resp.headers),
+                    url=resp.url,
+                )
+            except Exception as exc:
+                msg = str(exc)
+                if "Timeout" in type(exc).__name__ or "timed out" in msg.lower() or "timeout" in msg.lower():
+                    raise TimeoutError(f"Camoufox request timed out: {msg}") from exc
+                raise
+
+        return self.submit(_op, timeout=max(30, int(timeout or 30) + 15))
+
+    def _goto_page(self, page, url, timeout_ms):
+        resp = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        status = resp.status if resp else 200
+        deadline = time.monotonic() + min(15.0, timeout_ms / 1000.0)
+        while time.monotonic() < deadline:
+            title = page.title()
+            html = page.content()
+            if not _is_cloudflare_html(title, html):
+                return CamoufoxResponse(status_code=status, text=html, url=page.url)
+            page.wait_for_timeout(500)
+            status = 200
+        html = page.content()
+        return CamoufoxResponse(status_code=status, text=html, url=page.url)
+
+    def shutdown(self):
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                return
+            q = self._queue
+            t = self._thread
+            self._thread = None
+            self._queue = None
+        if q is not None:
+            q.put(_SHUTDOWN_SENTINEL)
+        if t is not None and t.is_alive():
+            t.join(timeout=5)
+
+
+_CAMOUFOX_WORKER = _CamoufoxWorker()
+atexit.register(_CAMOUFOX_WORKER.shutdown)
+
+
+def close_camoufox():
+    _CAMOUFOX_WORKER.shutdown()
+
+
+class CamoufoxSession:
+    def __init__(self, cookie_header="", worker=None):
+        self._worker = worker or _CAMOUFOX_WORKER
+        self._cookie_header = cookie_header or ""
+        self._initial_cookies = _parse_cookie_header(self._cookie_header)
+        self._ctx_id = None
+        self.headers = {
             "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
         }
-    )
-    if cookie_header:
-        session.headers["Cookie"] = cookie_header
-    return session
+        if self._cookie_header:
+            self.headers["Cookie"] = self._cookie_header
+
+    def _ensure_context(self):
+        if self._ctx_id is None:
+            extra_headers = {k: v for k, v in self.headers.items() if k.lower() != "cookie"}
+            self._ctx_id = self._worker.create_context(
+                cookie_header=self._cookie_header,
+                extra_headers=extra_headers,
+            )
+        return self._ctx_id
+
+    @property
+    def cookies(self):
+        if self._ctx_id is None:
+            return dict(self._initial_cookies)
+        merged = dict(self._initial_cookies)
+        merged.update(self._worker.get_cookies(self._ctx_id))
+        return merged
+
+    def request(self, method, url, timeout=30, headers=None, data=None, json=None, **_kwargs):
+        ctx_id = self._ensure_context()
+        return self._worker.perform_request(
+            ctx_id,
+            method,
+            url,
+            headers=headers,
+            data=data,
+            json_body=json,
+            timeout=timeout,
+        )
+
+    def close(self):
+        if self._ctx_id is not None:
+            ctx_id = self._ctx_id
+            self._ctx_id = None
+            self._worker.close_context(ctx_id, wait=True)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc_val, _exc_tb):
+        self.close()
+
+    def __del__(self):
+        if getattr(self, "_ctx_id", None) is not None and getattr(self, "_worker", None) is not None:
+            try:
+                ctx_id = self._ctx_id
+                self._ctx_id = None
+                self._worker.close_context(ctx_id, wait=False)
+            except Exception:
+                pass
+
+
+def new_session(cookie_header=""):
+    return CamoufoxSession(cookie_header=cookie_header)
 
 
 def request_or_fail(session, method, url, **kwargs):
@@ -162,7 +524,8 @@ def create_qris(session, order_id, payment_url, amount, source_payment="midtrans
     payment_response = request_or_fail(session, "GET", payment_url)
     payment_html = payment_response.text
 
-    csrf = session.cookies.get("csrf_cookie_name")
+    cookies = session.cookies
+    csrf = cookies.get("csrf_cookie_name") or cookies.get("sociabuzz_sb_cookie_csrf")
     if not csrf:
         csrf_match = re.search(r"csrf[_-]hash['\"]?\s*[:=]\s*['\"]([^'\"]+)", payment_html, flags=re.I)
         csrf = csrf_match.group(1) if csrf_match else ""

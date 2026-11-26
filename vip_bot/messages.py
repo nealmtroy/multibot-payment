@@ -422,6 +422,7 @@ def admin_command_list_text():
         "• <code>/chatid</code> - Cek ID chat grup ini\n"
         "• <code>/setvip &lt;chat_id|here&gt;</code> - Set VIP chat default\n"
         "• <code>/setlog &lt;chat_id|here&gt;</code> - Set channel log admin\n"
+        "• <code>/gateway [sociabuzz|saweria]</code> - Atur gateway QRIS aktif\n"
         "• <code>/config</code> - Lihat konfigurasi global\n"
         "\n📢 <b>Command Broadcast (Per Bot):</b>\n"
         "• <code>/set_broadcast [nama_bot]</code> - Simpan pesan broadcast (reply ke pesan)\n"

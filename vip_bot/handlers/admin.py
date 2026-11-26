@@ -10,6 +10,12 @@ from vip_bot.helpers import (
     is_admin,
     runtime_vip_chat_id,
     runtime_log_chat_id,
+    runtime_payment_gateway,
+    runtime_sociabuzz_username,
+    runtime_saweria_username,
+    runtime_gateway_username,
+    normalize_payment_gateway,
+    normalize_sociabuzz_username,
     send_log,
     parse_chat_setting,
     format_rupiah,
@@ -22,6 +28,7 @@ from vip_bot.helpers import (
     format_button_amount,
     format_log_datetime,
     safe_send_user,
+    safe_answer_callback,
     entities_to_json,
     validate_broadcast_time,
 )
@@ -42,6 +49,7 @@ from vip_bot.messages import (
 )
 from vip_bot.loops import send_broadcast_batch
 from sociabuzz_client import SociaBuzzError
+from saweria_client import SaweriaError, normalize_username as normalize_saweria_username
 
 LOGGER = logging.getLogger("telegram_vip_bot.handlers.admin")
 
@@ -111,6 +119,39 @@ def admin_package_edit_keyboard(bot_code, pkg):
             Button.inline(f"🔙 Kembali ke [{bot_code}]", data=f"adm_pkgbot_menu:{bot_code}"),
         ],
     ]
+
+
+async def build_runtime_settings_panel(config, db):
+    log_id = await runtime_log_chat_id(config, db)
+    vip_id = await runtime_vip_chat_id(config, db)
+    gw = await runtime_payment_gateway(config, db)
+    sb_user = await runtime_sociabuzz_username(config, db)
+    sw_user = await runtime_saweria_username(config, db)
+
+    settings_text = (
+        f"⚙️ <b>PENGATURAN RUNTIME</b>\n\n"
+        f"• <b>QRIS Gateway Aktif</b>: <b>{html.escape(gw.upper())}</b>\n"
+        f"• <b>Username SociaBuzz</b>: <code>{html.escape(sb_user or '-')}</code>\n"
+        f"• <b>Username Saweria</b>: <code>{html.escape(sw_user or '-')}</code>\n"
+        f"• <b>LOG_CHAT_ID</b>: <code>{log_id or '-'}</code>\n"
+        f"• <b>VIP_CHAT_ID</b>: <code>{vip_id or '-'}</code>\n\n"
+        f"Pilih gateway QRIS atau klik tombol di bawah untuk memperbarui setting:"
+    )
+    buttons = [
+        [
+            Button.inline("SOCIABUZZ" + (" ✅" if gw == "sociabuzz" else ""), b"adm_gw_set:sociabuzz"),
+            Button.inline("SAWERIA" + (" ✅" if gw == "saweria" else ""), b"adm_gw_set:saweria"),
+        ],
+        [
+            Button.inline("📝 Username SociaBuzz", b"adm_cfg:sociabuzz_username"),
+            Button.inline("📝 Username Saweria", b"adm_cfg:saweria_username"),
+        ],
+        [
+            Button.inline("📝 Ubah LOG_CHAT_ID", b"adm_cfg:log_chat_id"),
+            Button.inline("📝 Ubah VIP_CHAT_ID", b"adm_cfg:vip_chat_id"),
+        ],
+    ]
+    return settings_text, buttons
 
 
 def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_manager=None):
@@ -196,6 +237,9 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
 
             await db.upsert_user(user, bot_code="master")
 
+            gateway = await runtime_payment_gateway(config, db)
+            gateway_username = await runtime_gateway_username(config, db, gateway)
+
             async with qris_semaphore:
                 (
                     _session,
@@ -212,11 +256,14 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                     user,
                     checkout_amount,
                     "CUSTOM",
+                    gateway=gateway,
+                    gateway_username=gateway_username,
                 )
 
             socia_invoice_id = qris.get("inv_id")
             if not socia_invoice_id:
-                raise SociaBuzzError(f"QRIS response missing inv_id: {qris}")
+                err_cls = SaweriaError if gateway == "saweria" else SociaBuzzError
+                raise err_cls(f"QRIS response missing inv_id: {qris}")
 
             buyer_invoice_id = public_invoice_id()
             qr_file = io.BytesIO(qr_bytes)
@@ -262,6 +309,7 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                 },
                 referral=None,
                 bot_code="master",
+                payment_gateway=gateway,
             )
         except Exception as exc:
             LOGGER.exception("Failed to create custom QRIS: %s", exc)
@@ -384,6 +432,9 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
             pending = await db.list_pending_withdrawals()
             vip_id = await runtime_vip_chat_id(config, db)
             log_id = await runtime_log_chat_id(config, db)
+            gw = await runtime_payment_gateway(config, db)
+            gw_user = await runtime_gateway_username(config, db, gw)
+            gw_label = "Saweria" if gw == "saweria" else "SociaBuzz"
 
             status_text = (
                 f"📊 <b>STATUS SISTEM MULTIBOT PAYMENT</b>\n\n"
@@ -395,24 +446,13 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                 f"⚙️ <b>Konfigurasi Runtime:</b>\n"
                 f"• LOG_CHAT_ID: <code>{log_id or '-'}</code>\n"
                 f"• VIP_CHAT_ID (Fallback): <code>{vip_id or '-'}</code>\n"
-                f"• Gateway: SociaBuzz (<code>{config.sociabuzz_username}</code>)"
+                f"• Gateway QRIS: <b>{gw_label}</b> (<code>{html.escape(gw_user or '-')}</code>)"
             )
             await event.respond(status_text, parse_mode="html", buttons=admin_main_menu_keyboard())
             return
 
         if text == "⚙️ Pengaturan":
-            log_id = await runtime_log_chat_id(config, db)
-            vip_id = await runtime_vip_chat_id(config, db)
-            settings_text = (
-                f"⚙️ <b>PENGATURAN RUNTIME</b>\n\n"
-                f"• <b>LOG_CHAT_ID</b>: <code>{log_id or '-'}</code>\n"
-                f"• <b>VIP_CHAT_ID</b>: <code>{vip_id or '-'}</code>\n\n"
-                f"Klik tombol di bawah untuk memperbarui setting:"
-            )
-            buttons = [
-                [Button.inline("📝 Ubah LOG_CHAT_ID", b"adm_cfg:log_chat_id")],
-                [Button.inline("📝 Ubah VIP_CHAT_ID", b"adm_cfg:vip_chat_id")],
-            ]
+            settings_text, buttons = await build_runtime_settings_panel(config, db)
             await event.respond(settings_text, parse_mode="html", buttons=buttons)
             return
 
@@ -1019,6 +1059,47 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
         # ---------------------------------------------------------------------
         if action == "set_config":
             setting_key = state["data"]["key"]
+            if setting_key == "saweria_username":
+                try:
+                    clean_val = normalize_saweria_username(raw_text)
+                except SaweriaError as exc:
+                    await event.respond(
+                        f"⚠️ <b>Username Saweria tidak valid:</b> <code>{html.escape(str(exc))}</code>\n"
+                        "Masukkan username atau URL Saweria (contoh: <code>kiesha144</code> atau <code>https://saweria.co/kiesha144</code>):",
+                        parse_mode="html",
+                        buttons=cancel_keyboard(),
+                    )
+                    return
+                await db.set_setting(setting_key, clean_val)
+                admin_states.pop(event.sender_id, None)
+                await event.respond(
+                    f"✅ Username Saweria berhasil diubah menjadi <code>{html.escape(clean_val)}</code>.",
+                    parse_mode="html",
+                    buttons=admin_main_menu_keyboard(),
+                )
+                settings_text, buttons = await build_runtime_settings_panel(config, db)
+                await event.respond(settings_text, parse_mode="html", buttons=buttons)
+                return
+
+            if setting_key == "sociabuzz_username":
+                clean_val = normalize_sociabuzz_username(raw_text)
+                if not clean_val:
+                    await event.respond(
+                        "Username SociaBuzz tidak boleh kosong. Masukkan username SociaBuzz:",
+                        buttons=cancel_keyboard(),
+                    )
+                    return
+                await db.set_setting(setting_key, clean_val)
+                admin_states.pop(event.sender_id, None)
+                await event.respond(
+                    f"✅ Username SociaBuzz berhasil diubah menjadi <code>{html.escape(clean_val)}</code>.",
+                    parse_mode="html",
+                    buttons=admin_main_menu_keyboard(),
+                )
+                settings_text, buttons = await build_runtime_settings_panel(config, db)
+                await event.respond(settings_text, parse_mode="html", buttons=buttons)
+                return
+
             try:
                 int_val = int(raw_text)
                 await db.set_setting(setting_key, str(int_val))
@@ -1640,7 +1721,45 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
             )
             return
 
-        # 11. Config Updates
+        # 11. QRIS Gateway Switch
+        if data.startswith("adm_gw_set:"):
+            raw_gw = data.split(":", 1)[1]
+            try:
+                target_gw = normalize_payment_gateway(raw_gw)
+            except ValueError as exc:
+                await safe_answer_callback(event, str(exc), alert=True)
+                return
+
+            gw_user = await runtime_gateway_username(config, db, target_gw)
+            if not gw_user:
+                await safe_answer_callback(
+                    event,
+                    f"Username {target_gw.upper()} belum diatur! Atur username terlebih dahulu.",
+                    alert=True,
+                )
+                return
+
+            await db.set_setting("payment_gateway", target_gw)
+            await safe_answer_callback(event, f"✅ Gateway QRIS diubah ke {target_gw.upper()}!")
+            settings_text, buttons = await build_runtime_settings_panel(config, db)
+            try:
+                await event.edit(settings_text, parse_mode="html", buttons=buttons)
+            except errors.MessageNotModifiedError:
+                pass
+            await send_log(
+                client,
+                config,
+                db,
+                (
+                    f"💳 <b>QRIS Gateway Diubah</b>\n"
+                    f"• Gateway: <b>{html.escape(target_gw.upper())}</b>\n"
+                    f"• Akun: <code>{html.escape(gw_user)}</code>\n"
+                    f"• Admin: <code>{event.sender_id}</code>"
+                ),
+            )
+            return
+
+        # 12. Config Updates
         if data.startswith("adm_cfg:"):
             key = data.split(":")[1]
             admin_states[event.sender_id] = {
@@ -1648,6 +1767,24 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
                 "step": "value",
                 "data": {"key": key},
             }
+            if key == "saweria_username":
+                await event.edit(
+                    "📝 <b>Ubah Username Saweria</b>\n\n"
+                    "Ketik username atau link Saweria baru.\n"
+                    "Contoh: <code>kiesha144</code> atau <code>https://saweria.co/kiesha144</code>",
+                    parse_mode="html",
+                )
+                await event.respond("Masukkan username/URL Saweria baru:", buttons=cancel_keyboard())
+                return
+            if key == "sociabuzz_username":
+                await event.edit(
+                    "📝 <b>Ubah Username SociaBuzz</b>\n\n"
+                    "Ketik username atau link SociaBuzz baru.\n"
+                    "Contoh: <code>nama_akun</code>",
+                    parse_mode="html",
+                )
+                await event.respond("Masukkan username SociaBuzz baru:", buttons=cancel_keyboard())
+                return
             await event.edit(f"Ketik ID Telegram baru untuk <code>{key}</code>:", parse_mode="html")
             await event.respond("Masukkan ID baru:", buttons=cancel_keyboard())
             return
@@ -1655,6 +1792,46 @@ def register_admin_handlers(client, config, db, qris_semaphore, user_locks, bot_
     # -------------------------------------------------------------------------
     # Backward Compatibility Slash Commands (/bot_add, /package_add, etc.)
     # -------------------------------------------------------------------------
+    @client.on(events.NewMessage(pattern=r"^/(?:gateway|set_?gateway)(?:@\w+)?(?:\s+(.+))?$"))
+    async def gateway_command(event):
+        if not await require_admin(event, config, db):
+            return
+        raw_arg = (event.pattern_match.group(1) or "").strip()
+        if not raw_arg:
+            settings_text, buttons = await build_runtime_settings_panel(config, db)
+            await event.respond(settings_text, parse_mode="html", buttons=buttons)
+            return
+        try:
+            target_gw = normalize_payment_gateway(raw_arg)
+        except ValueError as exc:
+            await event.respond(f"❌ {html.escape(str(exc))}", parse_mode="html")
+            return
+        gw_user = await runtime_gateway_username(config, db, target_gw)
+        if not gw_user:
+            await event.respond(
+                f"⚠️ Username <b>{html.escape(target_gw.upper())}</b> belum diatur. "
+                f"Silakan atur di menu <b>⚙️ Pengaturan</b> terlebih dahulu.",
+                parse_mode="html",
+            )
+            return
+        await db.set_setting("payment_gateway", target_gw)
+        await send_log(
+            client,
+            config,
+            db,
+            (
+                f"💳 <b>QRIS Gateway Diubah</b>\n"
+                f"• Gateway: <b>{html.escape(target_gw.upper())}</b>\n"
+                f"• Akun: <code>{html.escape(gw_user)}</code>\n"
+                f"• Admin: <code>{event.sender_id}</code>"
+            ),
+        )
+        await event.respond(
+            f"✅ Gateway QRIS aktif diubah ke <b>{html.escape(target_gw.upper())}</b> "
+            f"(<code>{html.escape(gw_user)}</code>).",
+            parse_mode="html",
+            buttons=admin_main_menu_keyboard(),
+        )
     @client.on(events.NewMessage(pattern=r"^/bot_add(?:@\w+)?(?:\s+(.+))?$"))
     async def legacy_bot_add(event):
         if not await require_admin(event, config, db):

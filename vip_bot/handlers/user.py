@@ -7,6 +7,8 @@ from vip_bot.config import MIN_WITHDRAWAL_AMOUNT
 from vip_bot.helpers import (
     create_qris_with_retries_sync,
     public_invoice_id,
+    runtime_payment_gateway,
+    runtime_gateway_username,
     send_log,
     telegram_user_link,
     is_cloudflare_challenge,
@@ -36,6 +38,7 @@ from vip_bot.messages import (
     main_menu_button_labels,
 )
 from sociabuzz_client import SociaBuzzError
+from saweria_client import SaweriaError
 
 LOGGER = logging.getLogger("telegram_vip_bot.handlers.user")
 USER_CART_STATES = {}
@@ -120,7 +123,10 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
         except errors.MessageNotModifiedError:
             pass
 
+    gateway = "sociabuzz"
     try:
+        gateway = await runtime_payment_gateway(config, db)
+        gateway_username = await runtime_gateway_username(config, db, gateway)
         async with qris_semaphore:
             (
                 _session,
@@ -131,10 +137,19 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
                 qris,
                 qr_bytes,
                 checkout_amount,
-            ) = await asyncio.to_thread(create_qris_with_retries_sync, config, user, total_amount, note_prefix)
+            ) = await asyncio.to_thread(
+                create_qris_with_retries_sync,
+                config,
+                user,
+                total_amount,
+                note_prefix,
+                gateway=gateway,
+                gateway_username=gateway_username,
+            )
         socia_invoice_id = qris.get("inv_id")
         if not socia_invoice_id:
-            raise SociaBuzzError(f"QRIS response missing inv_id: {qris}")
+            err_cls = SaweriaError if gateway == "saweria" else SociaBuzzError
+            raise err_cls(f"QRIS response missing inv_id: {qris}")
 
         buyer_invoice_id = public_invoice_id()
         qr_file = io.BytesIO(qr_bytes)
@@ -182,6 +197,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
             packages=pkgs if is_multi else None,
             referral=referral,
             bot_code=bot_code,
+            payment_gateway=gateway,
         )
 
         if is_multi:
@@ -197,6 +213,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
                 f"<b>[{html.escape(bot_code)}] QRIS CREATED</b>\n\n"
                 "<blockquote>"
                 f"<b>Bot</b>: <code>{html.escape(bot_code)}</code>\n"
+                f"<b>Gateway</b>: <code>{html.escape(gateway.upper())}</code>\n"
                 f"<b>User</b>: {telegram_user_link(user)} (<code>{user.id}</code>)\n"
                 f"{pkg_log_desc}\n"
                 f"<b>Package Amount</b>: {format_button_amount(checkout_amount)}\n"
@@ -209,12 +226,13 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
             ),
         )
     except Exception as exc:
+        gw_label = gateway.upper()
         if is_cloudflare_challenge(exc):
-            LOGGER.warning("SociaBuzz Cloudflare challenge while creating QRIS for user %s", user.id)
+            LOGGER.warning("%s Cloudflare challenge while creating QRIS for user %s", gw_label, user.id)
         elif is_sociabuzz_timeout(exc):
-            LOGGER.warning("SociaBuzz timed out while creating QRIS for user %s after retries: %s", user.id, exc)
+            LOGGER.warning("%s timed out while creating QRIS for user %s after retries: %s", gw_label, user.id, exc)
         else:
-            LOGGER.exception("Failed to create QRIS")
+            LOGGER.exception("Failed to create QRIS (%s)", gw_label)
         try:
             await invoice_message.delete()
         except Exception:
@@ -228,7 +246,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
                 (
                     f"<b>[{html.escape(bot_code)}] QRIS gateway blocked</b>\n"
                     f"User: {telegram_user_link(user)} (<code>{user.id}</code>)\n"
-                    "Reason: <code>SociaBuzz Cloudflare HTTP 403</code>"
+                    f"Reason: <code>{html.escape(gw_label)} Cloudflare HTTP 403</code>"
                 ),
             )
             return
@@ -241,6 +259,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
                 (
                     f"<b>[{html.escape(bot_code)}] QRIS gateway timeout</b>\n"
                     f"User: {telegram_user_link(user)} (<code>{user.id}</code>)\n"
+                    f"Gateway: <code>{html.escape(gw_label)}</code>\n"
                     f"Packages: <code>{[p.get('code') for p in pkgs]}</code>\n"
                     f"Error: <code>{html.escape(str(exc))}</code>"
                 ),
@@ -251,7 +270,7 @@ async def send_qris_locked(event, config, db, qris_semaphore, user, package=None
             event.client,
             config,
             db,
-            f"<b>[{html.escape(bot_code)}] QRIS error</b>\n<code>{html.escape(str(exc))}</code>",
+            f"<b>[{html.escape(bot_code)}] QRIS error ({html.escape(gw_label)})</b>\n<code>{html.escape(str(exc))}</code>",
         )
 
 

@@ -2,6 +2,7 @@ telethon
 asyncpg
 python-dotenv
 qrcode[pil]
-requests
+curl_cffi
+camoufox
 pillow
 tzdata

@@ -134,11 +134,13 @@ CREATE TABLE IF NOT EXISTS payments (
     referral_id BIGINT,
     referrer_user_id BIGINT,
     packages_json TEXT NOT NULL DEFAULT '[]',
+    payment_gateway TEXT NOT NULL DEFAULT 'sociabuzz',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 ALTER TABLE payments ADD COLUMN IF NOT EXISTS packages_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS payment_gateway TEXT NOT NULL DEFAULT 'sociabuzz';
 
 CREATE INDEX IF NOT EXISTS idx_payments_user ON payments (bot_code, user_id, status, id DESC);
 CREATE INDEX IF NOT EXISTS idx_payments_next_check ON payments (next_check_at ASC, id ASC) WHERE status IN ('pending', 'invite_error', 'delivery_error');

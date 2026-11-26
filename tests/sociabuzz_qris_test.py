@@ -13,7 +13,7 @@ try:
         poll_status,
     )
 except ImportError:
-    print("Missing dependency: requests. Install with: pip install requests", file=sys.stderr)
+    print("Missing dependency: camoufox. Install with: pip install camoufox", file=sys.stderr)
     raise
 
 

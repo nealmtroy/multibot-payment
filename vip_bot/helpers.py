@@ -12,7 +12,7 @@ import re
 import secrets
 import string
 import time
-import requests
+from curl_cffi import requests as cffi_requests
 from telethon import Button, errors, functions, types
 from telethon.errors import FloodWaitError
 
@@ -24,7 +24,15 @@ from sociabuzz_client import (
     new_session,
     check_pending,
 )
+from saweria_client import (
+    SaweriaError,
+    create_qris as create_saweria_qris,
+    check_pending as check_saweria_pending,
+    new_session as new_saweria_session,
+    normalize_username as normalize_saweria_username,
+)
 from vip_bot.config import (
+    DONATION_MESSAGES,
     FIRST_NAMES,
     LAST_NAMES,
     FIRST_NAMES_MAN,
@@ -133,6 +141,10 @@ def random_indonesian_identity():
     clean_last = re.sub(r"[^a-zA-Z0-9]", "", last.lower())
     email = f"{clean_first}.{clean_last}{num}@gmail.com"
     return f"{first} {last}", email
+
+
+def random_donation_message():
+    return secrets.choice(DONATION_MESSAGES)
 
 
 def public_invoice_id():
@@ -267,7 +279,45 @@ def is_user_unreachable_error(exc):
 
 
 def is_sociabuzz_timeout(exc):
-    return isinstance(exc, (requests.Timeout, TimeoutError)) or "timed out" in str(exc).lower()
+    return isinstance(exc, (cffi_requests.exceptions.Timeout, TimeoutError)) or "timed out" in str(exc).lower()
+
+
+is_gateway_timeout = is_sociabuzz_timeout
+
+
+VALID_PAYMENT_GATEWAYS = ("sociabuzz", "saweria")
+
+
+def normalize_payment_gateway(raw):
+    val = (raw or "").strip().lower()
+    if val in VALID_PAYMENT_GATEWAYS:
+        return val
+    raise ValueError("Gateway QRIS harus SOCIABUZZ atau SAWERIA.")
+
+
+def normalize_sociabuzz_username(raw):
+    val = (raw or "").strip()
+    if not val:
+        return ""
+    if re.match(r"^https?://", val, flags=re.I):
+        from urllib.parse import urlparse
+        parts = [p for p in urlparse(val).path.split("/") if p]
+        val = parts[0] if parts else ""
+    elif "sociabuzz.com/" in val.lower():
+        after = val.split("sociabuzz.com/", 1)[1]
+        val = after.strip("/").split("/")[0]
+    return val.lstrip("@").strip("/")
+
+
+def detect_payment_gateway(payment):
+    if isinstance(payment, dict):
+        gw = (payment.get("payment_gateway") or "").strip().lower()
+        if gw in VALID_PAYMENT_GATEWAYS:
+            return gw
+        url = (payment.get("payment_url") or "").lower()
+        if "saweria.co" in url:
+            return "saweria"
+    return "sociabuzz"
 
 
 def is_permanent_invite_error(exc):
@@ -382,21 +432,55 @@ def user_link(payment):
     return f'<a href="tg://user?id={payment["user_id"]}">{name}</a>'
 
 
-def create_qris_sync(config, user, amount=None, note_prefix="VIP"):
-    session = new_session(config.sociabuzz_cookie)
+def create_qris_sync(config, user, amount=None, note_prefix="VIP", gateway="sociabuzz", gateway_username=None):
+    gw = normalize_payment_gateway(gateway or getattr(config, "payment_gateway", "sociabuzz") or "sociabuzz")
     buyer_name, buyer_email = random_indonesian_identity()
     checkout_amount = amount if amount is not None else config.payment_amount
-    note = f"{note_prefix} {user.id}"
-    order_id, payment_url, _ = create_donation_order(
-        session,
-        config.sociabuzz_username,
-        checkout_amount,
-        buyer_name,
-        buyer_email,
-        note,
-    )
-    qris = create_qris(session, order_id, payment_url, checkout_amount, source_payment="xendit")
-    qr_response = download_qr_response(session, qris)
+    note = random_donation_message()
+
+    if gw == "saweria":
+        username = (gateway_username or getattr(config, "saweria_username", "") or "").strip()
+        if not username:
+            raise SaweriaError("Username Saweria belum diatur. Silakan atur di menu Pengaturan Admin Bot.")
+        session = new_saweria_session()
+        order_id, payment_url, qris = create_saweria_qris(
+            session,
+            username,
+            checkout_amount,
+            buyer_name,
+            buyer_email,
+            note,
+        )
+        qr_response = download_qr_response(session, qris)
+        return (
+            session,
+            buyer_name,
+            buyer_email,
+            order_id,
+            payment_url,
+            qris,
+            qr_response.content,
+            checkout_amount,
+        )
+
+    username = (gateway_username or getattr(config, "sociabuzz_username", "") or "").strip()
+    if not username:
+        raise SociaBuzzError("Username SociaBuzz belum diatur. Silakan atur di menu Pengaturan Admin Bot.")
+    session = new_session(getattr(config, "sociabuzz_cookie", ""))
+    try:
+        order_id, payment_url, _ = create_donation_order(
+            session,
+            username,
+            checkout_amount,
+            buyer_name,
+            buyer_email,
+            note,
+        )
+        qris = create_qris(session, order_id, payment_url, checkout_amount, source_payment="xendit")
+        qr_response = download_qr_response(session, qris)
+    finally:
+        if hasattr(session, "close"):
+            session.close()
     return (
         session,
         buyer_name,
@@ -409,18 +493,35 @@ def create_qris_sync(config, user, amount=None, note_prefix="VIP"):
     )
 
 
-def create_qris_with_retries_sync(config, user, amount=None, note_prefix="VIP", attempts=3):
+def create_qris_with_retries_sync(
+    config,
+    user,
+    amount=None,
+    note_prefix="VIP",
+    attempts=3,
+    gateway="sociabuzz",
+    gateway_username=None,
+):
+    gw = normalize_payment_gateway(gateway or getattr(config, "payment_gateway", "sociabuzz") or "sociabuzz")
     last_exc = None
     for attempt in range(1, attempts + 1):
         try:
-            return create_qris_sync(config, user, amount, note_prefix)
+            return create_qris_sync(
+                config,
+                user,
+                amount,
+                note_prefix,
+                gateway=gw,
+                gateway_username=gateway_username,
+            )
         except Exception as exc:
             last_exc = exc
-            if not is_sociabuzz_timeout(exc) or attempt >= attempts:
+            if not is_gateway_timeout(exc) or attempt >= attempts:
                 raise
             delay = min(6, 2 ** (attempt - 1)) + random.uniform(0, 0.5)
             LOGGER.warning(
-                "SociaBuzz timed out while creating %s QRIS for user %s, retrying in %.1fs (%s/%s): %s",
+                "%s timed out while creating %s QRIS for user %s, retrying in %.1fs (%s/%s): %s",
+                gw.upper(),
                 note_prefix,
                 user.id,
                 delay,
@@ -432,12 +533,53 @@ def create_qris_with_retries_sync(config, user, amount=None, note_prefix="VIP", 
     raise last_exc
 
 
-def check_payment_sync(config, inv_id):
-    session = new_session(config.sociabuzz_cookie)
-    return check_pending(session, inv_id)
+def check_payment_sync(config, inv_id, gateway="sociabuzz"):
+    gw = (gateway or "sociabuzz").strip().lower()
+    if gw == "saweria":
+        session = new_saweria_session()
+        return check_saweria_pending(session, inv_id)
+    session = new_session(getattr(config, "sociabuzz_cookie", ""))
+    try:
+        return check_pending(session, inv_id)
+    finally:
+        if hasattr(session, "close"):
+            session.close()
 
 
 # Asynchronous DB-dependent Helpers
+
+async def runtime_payment_gateway(config, db):
+    if hasattr(db, "get_setting"):
+        val = await db.get_setting("payment_gateway")
+        if val:
+            normalized = val.strip().lower()
+            if normalized in VALID_PAYMENT_GATEWAYS:
+                return normalized
+    cfg_gw = (getattr(config, "payment_gateway", "sociabuzz") or "sociabuzz").strip().lower()
+    return cfg_gw if cfg_gw in VALID_PAYMENT_GATEWAYS else "sociabuzz"
+
+
+async def runtime_sociabuzz_username(config, db):
+    if hasattr(db, "get_setting"):
+        val = await db.get_setting("sociabuzz_username")
+        if val and val.strip():
+            return val.strip()
+    return (getattr(config, "sociabuzz_username", "") or "").strip()
+
+
+async def runtime_saweria_username(config, db):
+    if hasattr(db, "get_setting"):
+        val = await db.get_setting("saweria_username")
+        if val and val.strip():
+            return val.strip()
+    return (getattr(config, "saweria_username", "") or "").strip()
+
+
+async def runtime_gateway_username(config, db, gateway=None):
+    gw = (gateway or await runtime_payment_gateway(config, db)).strip().lower()
+    if gw == "saweria":
+        return await runtime_saweria_username(config, db)
+    return await runtime_sociabuzz_username(config, db)
 
 async def runtime_vip_chat_id(config, db):
     if hasattr(db, "get_setting"):

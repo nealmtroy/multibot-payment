@@ -7,6 +7,7 @@ from telethon.errors import FloodWaitError
 from vip_bot.config import WIB, BROADCAST_DISABLED_VALUES
 from vip_bot.helpers import (
     check_payment_sync,
+    detect_payment_gateway,
     is_cloudflare_challenge,
     is_permanent_invite_error,
     is_sociabuzz_timeout,
@@ -354,13 +355,19 @@ def format_log_datetime_wrapper(raw):
 async def poll_once(bot_manager_or_client, config, db, payment):
     bot_code = payment.get("bot_code") or "default"
     client = resolve_client(bot_manager_or_client, bot_code)
+    gateway = detect_payment_gateway(payment)
     try:
         if payment["status"] in {"invite_error", "delivery_error"}:
             await process_paid_payment(client, config, db, payment)
             return
 
-        status, status_url, elapsed_ms = await asyncio.to_thread(check_payment_sync, config, payment["inv_id"])
-        LOGGER.info("Invoice %s status=%s latency=%sms", payment["inv_id"], status, elapsed_ms)
+        status, status_url, elapsed_ms = await asyncio.to_thread(
+            check_payment_sync,
+            config,
+            payment["inv_id"],
+            gateway=gateway,
+        )
+        LOGGER.info("[%s] Invoice %s status=%s latency=%sms", gateway.upper(), payment["inv_id"], status, elapsed_ms)
         if status == "paid":
             await process_paid_payment(client, config, db, payment)
         elif status in {"failed_or_expired", "unknown"}:
@@ -401,8 +408,8 @@ async def poll_once(bot_manager_or_client, config, db, payment):
             )
     except Exception as exc:
         if is_cloudflare_challenge(exc):
-            marker = "SociaBuzz Cloudflare HTTP 403"
-            LOGGER.warning("SociaBuzz Cloudflare challenge while polling %s", payment["inv_id"])
+            marker = f"{gateway.upper()} Cloudflare HTTP 403"
+            LOGGER.warning("%s Cloudflare challenge while polling %s", gateway.upper(), payment["inv_id"])
             if payment["status"] == "pending":
                 created_at = parse_iso_datetime(payment.get("created_at")) or dt.datetime.now(dt.UTC)
                 expires_at = parse_iso_datetime(payment.get("qris_expires"))

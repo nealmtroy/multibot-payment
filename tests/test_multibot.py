@@ -238,6 +238,18 @@ class TestMultiBot(unittest.TestCase):
         self.assertIn("Primary", card)
         self.assertIn("botpayment1", card)
 
+    def test_sociabuzz_client_uses_camoufox_session(self):
+        from curl_cffi import requests as cffi_requests
+        from sociabuzz_client import CamoufoxSession, new_session
+        from vip_bot.helpers import is_sociabuzz_timeout
+
+        session = new_session("cf_clearance=abc")
+        self.assertIsInstance(session, CamoufoxSession)
+        self.assertEqual(session.cookies.get("cf_clearance"), "abc")
+        self.assertEqual(session.headers.get("Cookie"), "cf_clearance=abc")
+        self.assertTrue(is_sociabuzz_timeout(cffi_requests.exceptions.Timeout("Operation timed out")))
+        self.assertTrue(is_sociabuzz_timeout(TimeoutError()))
+
 
 if __name__ == "__main__":
     unittest.main()

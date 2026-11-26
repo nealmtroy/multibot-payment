@@ -52,6 +52,19 @@ LAST_NAMES_WOMAN = [
 FIRST_NAMES = FIRST_NAMES_MAN + FIRST_NAMES_WOMAN
 LAST_NAMES = LAST_NAMES_MAN + LAST_NAMES_WOMAN
 
+DONATION_MESSAGES = [
+    "Semangat terus ya",
+    "Semangat terus kak",
+    "keren banget kak",
+    "Semangat berkarya terus kak",
+    "Sehat selalu ya kak",
+    "Sukses terus kak",
+    "Ditunggu karya selanjutnya kak",
+    "Mantap banget kak, semangat",
+    "Makasih banyak kak, semangat",
+    "Selalu support kak",
+]
+
 ACTIVE_PAYMENT_STATUSES = (
     "pending",
     "processing_paid",
@@ -86,6 +99,8 @@ class Config:
     qris_create_concurrency: int
     admin_user_ids: set[int]
     log_level: str
+    saweria_username: str = ""
+    payment_gateway: str = "sociabuzz"
 
 
 def env_int(key: str, default: int) -> int:
@@ -120,6 +135,9 @@ def load_config() -> Config:
             if part.isdigit() or (part.startswith("-") and part[1:].isdigit()):
                 admin_ids.add(int(part))
 
+    raw_gw = os.getenv("PAYMENT_GATEWAY", "sociabuzz").strip().lower()
+    payment_gateway = raw_gw if raw_gw in {"sociabuzz", "saweria"} else "sociabuzz"
+
     return Config(
         api_id=api_id,
         api_hash=api_hash,
@@ -138,4 +156,6 @@ def load_config() -> Config:
         qris_create_concurrency=env_int("QRIS_CREATE_CONCURRENCY", 5),
         admin_user_ids=admin_ids,
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
+        saweria_username=os.getenv("SAWERIA_USERNAME", "").strip(),
+        payment_gateway=payment_gateway,
     )
